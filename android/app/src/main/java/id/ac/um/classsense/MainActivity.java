@@ -1,5 +1,3 @@
 package id.ac.um.classsense;
 
-import com.getcapacitor.BridgeActivity;
-
-public class MainActivity extends BridgeActivity {}
+public class MainActivity extends id.ac.um.ft.classsense.MainActivity {}
