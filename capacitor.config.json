@@ -1,0 +1,9 @@
+{
+  "appId": "id.ac.um.ft.classsense",
+  "appName": "ClassSense",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  }
+}
