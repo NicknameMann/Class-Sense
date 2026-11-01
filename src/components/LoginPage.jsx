@@ -14,7 +14,12 @@ import {
   Sparkles,
   Info,
 } from "lucide-react";
-import { authenticateUser, REGISTERED_USERS, GUEST_USER } from "../services/authService";
+import {
+  authenticateUser,
+  createSignedSession,
+  REGISTERED_USERS,
+  GUEST_USER,
+} from "../services/authService";
 
 export default function LoginPage({
   onLoginSuccess,
@@ -28,25 +33,28 @@ export default function LoginPage({
   const [errorMessage, setErrorMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setErrorMessage("");
 
     if (!identifier.trim() || !password.trim()) {
-      setErrorMessage("Silakan masukkan Email / NIP / NIM dan kata sandi.");
+      setErrorMessage("Silakan masukkan Email akun dan kata sandi.");
       return;
     }
 
     setIsLoading(true);
-    setTimeout(() => {
-      const result = authenticateUser(identifier, password);
+    try {
+      const result = await authenticateUser(identifier, password);
       setIsLoading(false);
       if (result.success) {
         onLoginSuccess(result.user);
       } else {
         setErrorMessage(result.error);
       }
-    }, 400);
+    } catch (err) {
+      setIsLoading(false);
+      setErrorMessage(err.message || "Gagal memproses autentikasi.");
+    }
   };
 
   const handleQuickLogin = (userType) => {
@@ -55,13 +63,13 @@ export default function LoginPage({
     setTimeout(() => {
       setIsLoading(false);
       if (userType === "sarpras") {
-        onLoginSuccess(REGISTERED_USERS[0]);
+        onLoginSuccess(createSignedSession(REGISTERED_USERS[0], 2));
       } else if (userType === "mahasiswa") {
-        onLoginSuccess(REGISTERED_USERS[1]);
+        onLoginSuccess(createSignedSession(REGISTERED_USERS[1], 2));
       } else if (userType === "guest") {
         onLoginSuccess(GUEST_USER);
       }
-    }, 300);
+    }, 250);
   };
 
   return (
@@ -170,7 +178,7 @@ export default function LoginPage({
 
           <div>
             <label className="text-xs font-bold text-slate-700 block mb-1">
-              Email / NIP / NIM
+              Email Akun Kampus
             </label>
             <div className="relative">
               <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -178,7 +186,7 @@ export default function LoginPage({
                 type="text"
                 value={identifier}
                 onChange={(e) => setIdentifier(e.target.value)}
-                placeholder="sarpras@um.ac.id atau 240535615714"
+                placeholder="sarpras@um.ac.id atau mahasiswa@um.ac.id"
                 className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-700/20 focus:border-teal-700"
               />
             </div>
@@ -238,14 +246,14 @@ export default function LoginPage({
           >
             <div className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center text-xs font-black shadow-xs">
-                BS
+                SP
               </div>
               <div>
                 <span className="text-xs font-black text-slate-900 block leading-tight">
                   Staf Sarpras FT (Hak Penuh Admin)
                 </span>
                 <span className="text-[10px] text-emerald-800 font-semibold block">
-                  Bisa Kendalikan AC &amp; Lampu, Audit, IoT Control
+                  Bisa Kendalikan AC &amp; Lampu, Audit, Tambah Ruangan
                 </span>
               </div>
             </div>
@@ -261,7 +269,7 @@ export default function LoginPage({
           >
             <div className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-xl bg-sky-600 text-white flex items-center justify-center text-xs font-black shadow-xs">
-                RA
+                FT
               </div>
               <div>
                 <span className="text-xs font-black text-slate-900 block leading-tight">

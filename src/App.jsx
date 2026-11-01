@@ -60,6 +60,8 @@ import {
   GUEST_USER,
   authenticateUser,
   checkPermission,
+  createSignedSession,
+  verifySessionIntegrity,
 } from "./services/authService";
 
 import {
@@ -175,27 +177,49 @@ export default function App() {
     isSyncing: false,
   });
 
-  // Role-Based Access Control (RBAC) & Sesi Pengguna
+  // Role-Based Access Control (RBAC) & Sesi Pengguna Berintegritas Kriptografis
+  // Default awal instalasi / buka pertama kali: Tamu / Pengunjung (Read-Only Least Privilege)
   const [currentUser, setCurrentUser] = useState(() => {
     try {
-      const saved = localStorage.getItem("classsense_auth_user");
-      if (saved) return JSON.parse(saved);
+      if (typeof sessionStorage !== "undefined") {
+        const saved = sessionStorage.getItem("classsense_session");
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (verifySessionIntegrity(parsed)) {
+            return parsed;
+          } else {
+            console.warn("⚠️ Sesi login tidak valid atau telah dimanipulasi. Mengembalikan ke mode Tamu.");
+            sessionStorage.removeItem("classsense_session");
+          }
+        }
+      }
     } catch (e) {
-      console.error(e);
+      console.error("Gagal membaca sesi pengguna:", e);
     }
-    // Default Staf Sarpras (Admin) agar seluruh fitur demonstrasi dosen langsung aktif
-    return REGISTERED_USERS[0];
+    // Default Role: Tamu / Civitas Akademika (Read-Only Monitoring)
+    return GUEST_USER;
   });
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [permissionPromptMessage, setPermissionPromptMessage] = useState(null);
 
-  // Simpan Sesi Pengguna ke LocalStorage
+  // Simpan Sesi Pengguna ke SessionStorage (Hanya jika lolos verifikasi integritas)
   useEffect(() => {
-    if (currentUser) {
-      localStorage.setItem("classsense_auth_user", JSON.stringify(currentUser));
-    } else {
-      localStorage.removeItem("classsense_auth_user");
+    try {
+      if (typeof sessionStorage !== "undefined") {
+        if (currentUser && currentUser.role !== "guest") {
+          const isValid = verifySessionIntegrity(currentUser);
+          if (isValid) {
+            sessionStorage.setItem("classsense_session", JSON.stringify(currentUser));
+          } else {
+            sessionStorage.removeItem("classsense_session");
+          }
+        } else {
+          sessionStorage.removeItem("classsense_session");
+        }
+      }
+    } catch (e) {
+      console.error("Gagal menyimpan sesi pengguna:", e);
     }
   }, [currentUser]);
 
@@ -464,20 +488,53 @@ export default function App() {
   }, [currentAnalyticsRoom]);
 
   // --------------------------------------------------------------------------
-  // HANDLERS KONTROL AKSI JARAK JAUH & DEMO (DILINDUNGI RBAC)
+  // GUARD KEAMANAN & INTEGRITAS SESI (ANTI-TAMPERING & RBAC ENFORCEMENT)
   // --------------------------------------------------------------------------
-  const handleTurnOffSingleAC = async (roomId) => {
-    if (!checkPermission(currentUser, "canControlActuators")) {
+  const enforceSecureAction = (permissionKey) => {
+    // 1. Verifikasi Integritas Sesi Kriptografis (Cegah modifikasi paksa role di DevTools)
+    const isSessionIntegrityValid = verifySessionIntegrity(currentUser);
+    if (!isSessionIntegrityValid) {
+      console.warn("🚨 Terdeteksi manipulasi sesi atau sesi telah kedaluwarsa. Mengembalikan ke mode Tamu.");
+      setCurrentUser(GUEST_USER);
+      try {
+        if (typeof sessionStorage !== "undefined") {
+          sessionStorage.removeItem("classsense_session");
+        }
+      } catch {}
       setPermissionPromptMessage(
-        `Akses Terbatas: Anda saat ini masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Fitur pemadaman AC jarak jauh hanya dapat dieksekusi oleh Staf Sarpras (Admin FT UM).`
+        "Sesi Anda telah kedaluwarsa atau tidak valid (Integrity Check Failed). Silakan masuk kembali dengan kredensial yang sah."
       );
       setShowLoginModal(true);
-      return;
+      return false;
     }
+
+    // 2. Verifikasi Hak Akses (Least Privilege RBAC)
+    if (permissionKey && !checkPermission(currentUser, permissionKey)) {
+      setPermissionPromptMessage(
+        `Akses Terbatas: Anda saat ini masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Tindakan ini hanya dapat dieksekusi oleh Staf Sarpras (Admin FT UM).`
+      );
+      setShowLoginModal(true);
+      return false;
+    }
+
+    return true;
+  };
+
+  // --------------------------------------------------------------------------
+  // HANDLERS KONTROL AKSI JARAK JAUH & DEMO (DILINDUNGI RBAC & TOKEN AUTH)
+  // --------------------------------------------------------------------------
+  const handleTurnOffSingleAC = async (roomId) => {
+    if (!enforceSecureAction("canControlActuators")) return;
+
     setRawRooms((prev) =>
       prev.map((r) => (r.id === roomId ? { ...r, acActive: false, temp: 24.5 } : r))
     );
-    const result = await syncActuatorToApi(roomId, { acActive: false, temp: 24.5 });
+    const result = await syncActuatorToApi(
+      roomId,
+      { acActive: false, temp: 24.5 },
+      5000,
+      currentUser?.idToken
+    );
     showWriteOutcome(result, {
       synced: `AC pada ruangan ${roomId} dimatikan dan tersinkron ke Firebase.`,
       local: `AC pada ruangan ${roomId} dimatikan di aplikasi; Firebase belum tersinkron.`,
@@ -486,13 +543,8 @@ export default function App() {
   };
 
   const handleTurnOffAllAC = async () => {
-    if (!checkPermission(currentUser, "canControlActuators")) {
-      setPermissionPromptMessage(
-        `Akses Terbatas: Anda masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Master Shutdown AC fasilitas kampus hanya diizinkan untuk Staf Sarpras (Admin FT UM).`
-      );
-      setShowLoginModal(true);
-      return;
-    }
+    if (!enforceSecureAction("canControlActuators")) return;
+
     const targetRooms = rawRooms.filter((room) => !room.isOccupied && room.acActive);
     if (targetRooms.length === 0) {
       showToast("Tidak ada AC aktif di ruangan kosong.");
@@ -504,7 +556,14 @@ export default function App() {
       )
     );
     const results = await Promise.all(
-      targetRooms.map((room) => syncActuatorToApi(room.id, { acActive: false, temp: 24.5 }))
+      targetRooms.map((room) =>
+        syncActuatorToApi(
+          room.id,
+          { acActive: false, temp: 24.5 },
+          5000,
+          currentUser?.idToken
+        )
+      )
     );
     showWriteOutcome(results, {
       synced: "AC aktif di ruangan kosong dipadamkan dan tersinkron ke Firebase.",
@@ -514,13 +573,8 @@ export default function App() {
   };
 
   const handleTurnOffCorridorLamps = async () => {
-    if (!checkPermission(currentUser, "canControlActuators")) {
-      setPermissionPromptMessage(
-        `Akses Terbatas: Anda masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Pemadaman lampu koridor fasilitas kampus memerlukan wewenang Staf Sarpras (Admin FT UM).`
-      );
-      setShowLoginModal(true);
-      return;
-    }
+    if (!enforceSecureAction("canControlActuators")) return;
+
     setRawRooms((prev) =>
       prev.map((r) =>
         r.id === "K-WEST"
@@ -528,7 +582,12 @@ export default function App() {
           : r
       )
     );
-    const result = await syncActuatorToApi("K-WEST", { lightsActive: false, lux: 420 });
+    const result = await syncActuatorToApi(
+      "K-WEST",
+      { lightsActive: false, lux: 420 },
+      5000,
+      currentUser?.idToken
+    );
     showWriteOutcome(result, {
       synced: "Lampu Koridor Sayap Barat dipadamkan dan tersinkron ke Firebase.",
       local: "Lampu koridor dipadamkan lokal; Firebase belum tersinkron.",
@@ -537,32 +596,22 @@ export default function App() {
   };
 
   const handleOpenSimulator = () => {
-    if (!checkPermission(currentUser, "canAccessSimulator")) {
-      setPermissionPromptMessage(
-        `Akses Terbatas: Anda masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Simulator Telemetri IoT ESP32 (manipulasi nilai sensor dan pengujian algoritma) dibatasi untuk Staf Sarpras / Penguji Dosen.`
-      );
-      setShowLoginModal(true);
-      return;
-    }
+    if (!enforceSecureAction("canAccessSimulator")) return;
     setIsSimulatorOpen(true);
   };
 
   // --------------------------------------------------------------------------
-  // HANDLERS TAMBAH & HAPUS RUANGAN (FIREBASE RTDB LIVE SYNC)
+  // HANDLERS TAMBAH & HAPUS RUANGAN (FIREBASE RTDB LIVE SYNC DENGAN AUTH TOKEN)
   // --------------------------------------------------------------------------
   const handleOpenAddRoomModal = () => {
-    if (!checkPermission(currentUser, "canManageRooms")) {
-      setPermissionPromptMessage(
-        `Akses Terbatas: Anda saat ini masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Fitur penambahan ruangan baru kampus UM memerlukan wewenang Staf Sarpras (Admin FT UM).`
-      );
-      setShowLoginModal(true);
-      return;
-    }
+    if (!enforceSecureAction("canManageRooms")) return;
     setShowAddRoomModal(true);
   };
 
   const handleAddRoomSubmit = async (newRoomData) => {
-    const result = await addRoomToApi(newRoomData);
+    if (!enforceSecureAction("canManageRooms")) return;
+
+    const result = await addRoomToApi(newRoomData, 5000, currentUser?.idToken);
     if (result.success) {
       const savedRoom = result.data;
       setRawRooms((prev) => [savedRoom, ...prev.filter((r) => r.id !== savedRoom.id)]);
@@ -578,18 +627,12 @@ export default function App() {
   };
 
   const handleDeleteRoom = async (roomId) => {
-    if (!checkPermission(currentUser, "canManageRooms")) {
-      setPermissionPromptMessage(
-        `Akses Terbatas: Anda saat ini masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Fitur penghapusan ruangan dari Firebase RTDB dibatasi untuk Staf Sarpras (Admin FT UM).`
-      );
-      setShowLoginModal(true);
-      return;
-    }
+    if (!enforceSecureAction("canManageRooms")) return;
 
     const roomTarget = rawRooms.find((r) => r.id === roomId);
     const roomCode = roomTarget ? roomTarget.code : roomId;
 
-    const result = await deleteRoomFromApi(roomId);
+    const result = await deleteRoomFromApi(roomId, 5000, currentUser?.idToken);
     if (!result.success) {
       setRoomToDelete(null);
       showToast(`Firebase menolak penghapusan ruangan ${roomCode}; ruangan tetap ditampilkan.`);
@@ -3141,7 +3184,8 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={() => {
-                      setCurrentUser(REGISTERED_USERS[0]);
+                      const signed = createSignedSession(REGISTERED_USERS[0], 2);
+                      setCurrentUser(signed);
                       setShowProfileModal(false);
                       showToast("Beralih ke Akun Staf Sarpras (Admin Penuh)");
                     }}
@@ -3152,7 +3196,7 @@ export default function App() {
                     }`}
                   >
                     <div className="w-6 h-6 rounded-lg bg-emerald-600 text-white flex items-center justify-center text-[10px] font-black shrink-0">
-                      BS
+                      SP
                     </div>
                     <div className="truncate">
                       <span className="block text-[11px] font-black truncate">Staf Sarpras</span>
@@ -3162,7 +3206,8 @@ export default function App() {
 
                   <button
                     onClick={() => {
-                      setCurrentUser(REGISTERED_USERS[1]);
+                      const signed = createSignedSession(REGISTERED_USERS[1], 2);
+                      setCurrentUser(signed);
                       setShowProfileModal(false);
                       showToast("Beralih ke Akun Mahasiswa FT (Akses Reguler)");
                     }}
@@ -3173,7 +3218,7 @@ export default function App() {
                     }`}
                   >
                     <div className="w-6 h-6 rounded-lg bg-sky-600 text-white flex items-center justify-center text-[10px] font-black shrink-0">
-                      RA
+                      FT
                     </div>
                     <div className="truncate">
                       <span className="block text-[11px] font-black truncate">Mahasiswa FT</span>
@@ -3198,6 +3243,11 @@ export default function App() {
                 <button
                   onClick={() => {
                     setCurrentUser(GUEST_USER);
+                    try {
+                      if (typeof sessionStorage !== "undefined") {
+                        sessionStorage.removeItem("classsense_session");
+                      }
+                    } catch {}
                     setShowProfileModal(false);
                     showToast("Anda telah keluar (Mode Tamu / Publik)");
                   }}

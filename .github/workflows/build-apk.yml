@@ -42,17 +42,41 @@ jobs:
           fi
           npx cap sync android
 
-      - name: Compile Debug APK
+      - name: Generate Release Signing Keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore android/app/release.keystore \
+            -alias classsense \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass classsense123 \
+            -keypass classsense123 \
+            -dname "CN=ClassSense UM, OU=Teknik Elektro dan Informatika, O=Universitas Negeri Malang, L=Malang, ST=Jawa Timur, C=ID"
+
+      - name: Compile Debug & Signed Release APK
         working-directory: ./android
+        env:
+          ANDROID_KEYSTORE_PATH: release.keystore
+          ANDROID_KEYSTORE_PASSWORD: classsense123
+          ANDROID_KEY_ALIAS: classsense
+          ANDROID_KEY_PASSWORD: classsense123
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleDebug assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/ClassSense-Release-Signed.apk || true
 
-      - name: Upload APK Artifact
+      - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ClassSense-Android-APK
+          name: ClassSense-Debug-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload Signed Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClassSense-Release-Signed-APK
+          path: android/app/build/outputs/apk/release/ClassSense-Release-Signed.apk
 
       - name: 10. Publikasikan APK ke Menu Releases (Link Download Langsung)
         uses: softprops/action-gh-release@v2
@@ -60,7 +84,14 @@ jobs:
         with:
           tag_name: v1.0.${{ github.run_number }}
           name: "ClassSense Mobile v1.0.${{ github.run_number }}"
-          body: "Build otomatis aplikasi Android ClassSense (Mobile & Wireless Computing - UM)."
-          files: android/app/build/outputs/apk/debug/app-debug.apk
+          body: |
+            ## 📱 Rilis Otomatis ClassSense Mobile
+            - **Platform:** Android (Capacitor Native)
+            - **Build Type:** Signed Release & Debug APK
+            - **Sistem:** Monitoring Kualitas Lingkungan & Ketersediaan Ruang Kuliah Berbasis Wireless IoT
+            - **Institusi:** Fakultas Teknik, Universitas Negeri Malang (UM)
+          files: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/release/ClassSense-Release-Signed.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

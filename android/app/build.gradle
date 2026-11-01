@@ -16,10 +16,30 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+            if (keystorePath && file(keystorePath).exists()) {
+                storeFile file(keystorePath)
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: "classsense123"
+                keyAlias System.getenv("ANDROID_KEY_ALIAS") ?: "classsense"
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD") ?: "classsense123"
+            } else if (file('release.keystore').exists()) {
+                storeFile file('release.keystore')
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: "classsense123"
+                keyAlias System.getenv("ANDROID_KEY_ALIAS") ?: "classsense"
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD") ?: "classsense123"
+            } else {
+                // Fallback aman ke signing config debug untuk development lokal
+                initWith(signingConfigs.debug)
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
         }
     }
 }

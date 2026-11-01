@@ -182,8 +182,41 @@ Seluruh data ruangan telah disesuaikan dengan lingkungan nyata Fakultas Teknik (
 
 File workflow `.github/workflows/build-apk.yml` telah dikonfigurasi untuk:
 1. Menjalankan `npm run build` dan `npx cap sync android` secara otomatis saat commit di-push ke branch `main`/`develop` atau saat dipicu manual (*workflow dispatch*).
-2. Mengompilasi APK debug menggunakan Node 20, Java JDK 21 Temurin, dan Android SDK (`./gradlew assembleDebug`).
-3. Mengunggah file artifact APK (`app-debug.apk`) ke GitHub Artifacts (tersedia 30 hari).
-4. **Publikasi Otomatis ke GitHub Releases:** Begitu branch `main` menerima update, action `softprops/action-gh-release@v2` akan memublikasikan rilis baru dengan tag `v1.0.<run_number>` yang berisi file unduhan langsung `app-debug.apk`.
+2. Membuat keystore rilis otomatis dengan `keytool` berstandar RSA 2048-bit.
+3. Mengompilasi APK debug sekaligus **Signed Release APK** menggunakan Node 20, Java JDK 21 Temurin, dan Android SDK:
+   ```bash
+   ./gradlew assembleDebug assembleRelease --no-daemon
+   ```
+4. Mengunggah file artifact APK (`app-debug.apk` dan `ClassSense-Release-Signed.apk`) ke GitHub Artifacts (tersedia 30 hari).
+5. **Publikasi Otomatis ke GitHub Releases:** Begitu branch `main` menerima update, action `softprops/action-gh-release@v2` otomatis memublikasikan rilis baru dengan tag `v1.0.<run_number>` yang berisi file unduhan langsung `ClassSense-Release-Signed.apk` dan `app-debug.apk`.
+
+---
+
+## 🛡️ Arsitektur Keamanan & Security Hardening (Codex Audit Resolution)
+
+Proyek ClassSense telah diperkuat berdasarkan 5 temuan audit keamanan industri:
+
+1. **Pembersihan Kredensial & Bebas Plaintext Password:**
+   - Tidak ada lagi password plaintext atau identitas pribadi asli di dalam kode sumber `src/services/authService.js`.
+   - Menggunakan verifikasi kriptografis satu arah (One-Way Hash SHA-256 + Salt) untuk pengujian lokal/offline, dan mendukung integrasi token JWT nyata dari **Firebase Authentication REST API** (Google Identity Toolkit) jika `VITE_FIREBASE_API_KEY` aktif.
+
+2. **Default Role Least-Privilege & Anti-Tampering Sesi:**
+   - Sesi awal saat aplikasi pertama kali dibuka adalah **Tamu / Read-Only** (`GUEST_USER`). Pengguna hanya dapat memantau telemetri ruangan, grafik analitik, dan rekomendasi SAW.
+   - Sesi pengguna disimpan di `sessionStorage` dalam bentuk signed token dengan `expiresAt` (masa berlaku 2 jam) dan `signatureHash` (HMAC/SHA-256 integrity checksum).
+   - Fungsi `verifySessionIntegrity()` memverifikasi integritas tanda tangan digital sebelum setiap eksekusi perintah aktuator atau manajemen ruangan. Jika pengguna memanipulasi role secara paksa melalui DevTools, sesi otomatis ditolak dan dikembalikan ke mode Tamu.
+
+3. **Proteksi Firebase Realtime Database (`database.rules.json`):**
+   - Mendefinisikan aturan `.read: true` untuk pemantauan ketersediaan ruangan secara publik.
+   - Mengunci operasi tulis dengan `.write: "auth != null"`.
+   - Menambahkan aturan `.validate` untuk memeriksa rentang fisik sensor secara ketat (`temp`: 10–50°C, `humidity`: 0–100%, `co2`: 300–5000 ppm, `pm25`: 0–500 µg/m³).
+   - Fungsi penulisan API (`syncActuatorToApi`, `addRoomToApi`, `deleteRoomFromApi`) otomatis menyertakan parameter `?auth=<idToken>` saat token autentikasi tersedia.
+
+4. **Keamanan Variabel Lingkungan (`.env` & `.env.example`):**
+   - Hanya memuat endpoint publik sisi klien (`VITE_IOT_API_URL` dan `VITE_FIREBASE_API_KEY`).
+   - File `.env.example` mendokumentasikan larangan penyimpanan password atau private key di variabel berawalan `VITE_`.
+
+5. **Kompilasi Signed Release APK:**
+   - Konfigurasi `signingConfigs.release` di `android/app/build.gradle` mendukung penandatanganan otomatis berbasis environment variables dengan fallback aman untuk development lokal.
+   - Workflow GitHub Actions otomatis menghasilkan APK rilis bertanda tangan digital siap distribusi produksi (`ClassSense-Release-Signed.apk`).
 
 

@@ -19,6 +19,7 @@ import {
   addRoomToApi,
   deleteRoomFromApi,
   normalizeFirebaseUrl,
+  buildFirebaseEndpoint,
   RAW_CAMPUS_ROOMS,
   DEFAULT_OUTDOOR_CLIMATE,
 } from "../src/services/iotSimulatorApi.js";
@@ -26,6 +27,9 @@ import {
 import {
   authenticateUser,
   checkPermission,
+  createSignedSession,
+  verifySessionIntegrity,
+  sha256Sync,
   REGISTERED_USERS,
   GUEST_USER,
 } from "../src/services/authService.js";
@@ -331,34 +335,26 @@ async function runTestSuite() {
   console.log("\n🔐 Menguji Autentikasi Pengguna & Role-Based Access Control (RBAC)...");
   
   // Login Staf Sarpras (Admin) dengan Email
-  const authSarprasEmail = authenticateUser("sarpras@um.ac.id", "admin123");
+  const authSarprasEmail = await authenticateUser("sarpras@um.ac.id", "admin123");
   assertTest(
     authSarprasEmail.success && authSarprasEmail.user.role === "admin",
-    "Auth & RBAC 1: Login Staf Sarpras via Email",
+    "Auth & RBAC 1: Login Staf Sarpras via Email (SHA-256 / Firebase)",
     `Role: ${authSarprasEmail.user?.role}`
   );
 
-  // Login Staf Sarpras (Admin) dengan NIP
-  const authSarprasNip = authenticateUser("198005122008121002", "admin123");
-  assertTest(
-    authSarprasNip.success && authSarprasNip.user.nip === "198005122008121002",
-    "Auth & RBAC 2: Login Staf Sarpras via NIP",
-    "Identitas staf diterima"
-  );
-
-  // Login Mahasiswa dengan NIM
-  const authMhs = authenticateUser("240535615714", "mhs123");
+  // Login Mahasiswa dengan Email
+  const authMhs = await authenticateUser("mahasiswa@um.ac.id", "mhs123");
   assertTest(
     authMhs.success && authMhs.user.role === "mahasiswa",
-    "Auth & RBAC 3: Login Mahasiswa via NIM",
+    "Auth & RBAC 2: Login Mahasiswa via Email (SHA-256 / Firebase)",
     `Role: ${authMhs.user?.role}`
   );
 
   // Uji Kredensial Salah
-  const authFailed = authenticateUser("sarpras@um.ac.id", "wrong_pass");
+  const authFailed = await authenticateUser("sarpras@um.ac.id", "wrong_pass");
   assertTest(
     authFailed.success === false && authFailed.user === null,
-    "Auth & RBAC 4: Penolakan Password Salah",
+    "Auth & RBAC 3: Penolakan Password Salah",
     `Pesan Error: ${authFailed.error}`
   );
 
@@ -369,7 +365,7 @@ async function runTestSuite() {
     checkPermission(sarprasUser, "canControlActuators") === true &&
     checkPermission(sarprasUser, "canAccessSimulator") === true &&
     checkPermission(sarprasUser, "canAccessAuditManagement") === true,
-    "Auth & RBAC 5: Hak Akses Penuh Staf Sarpras (Admin)",
+    "Auth & RBAC 4: Hak Akses Penuh Staf Sarpras (Admin)",
     "canControlActuators: true, canAccessSimulator: true"
   );
 
@@ -378,16 +374,18 @@ async function runTestSuite() {
     checkPermission(mhsUser, "canControlActuators") === false &&
     checkPermission(mhsUser, "canAccessSimulator") === false &&
     checkPermission(mhsUser, "canBookRooms") === true,
-    "Auth & RBAC 6: Hak Akses Terbatas Mahasiswa",
+    "Auth & RBAC 5: Hak Akses Terbatas Mahasiswa",
     "canControlActuators: false (Aman), canBookRooms: true"
   );
 
-  // Verifikasi Tamu / Publik: Tidak bisa booking
+  // Verifikasi Tamu / Publik: Default role non-admin, tidak bisa booking
   assertTest(
+    GUEST_USER.role === "guest" &&
     checkPermission(GUEST_USER, "canBookRooms") === false &&
-    checkPermission(GUEST_USER, "canControlActuators") === false,
-    "Auth & RBAC 7: Pembatasan Pengunjung Tamu/Publik",
-    "canBookRooms: false, canControlActuators: false"
+    checkPermission(GUEST_USER, "canControlActuators") === false &&
+    checkPermission(GUEST_USER, "canManageRooms") === false,
+    "Auth & RBAC 6: Default Role Awal adalah Non-Admin / Read-Only Guest",
+    "canBookRooms: false, canControlActuators: false, canManageRooms: false"
   );
 
   // Verifikasi Hak Tambah / Hapus Ruangan (canManageRooms)
@@ -395,8 +393,67 @@ async function runTestSuite() {
     checkPermission(sarprasUser, "canManageRooms") === true &&
     checkPermission(mhsUser, "canManageRooms") === false &&
     checkPermission(GUEST_USER, "canManageRooms") === false,
-    "Auth & RBAC 8: Hak Pengelolaan Ruangan (canManageRooms)",
+    "Auth & RBAC 7: Hak Pengelolaan Ruangan (canManageRooms)",
     "Sarpras: true, Mahasiswa: false, Guest: false"
+  );
+
+  // --------------------------------------------------------------------------
+  // 14b. SECURITY AUDIT: Kredensial Bersih, Sesi Bertanda Tangan, & Anti-Tampering
+  // --------------------------------------------------------------------------
+  console.log("\n🛡️ Menguji Audit Keamanan & Integritas Sesi...");
+
+  // 1. Verifikasi Tidak Ada Plaintext Password di REGISTERED_USERS
+  const hasPlaintextPassword = REGISTERED_USERS.some((u) => typeof u.password !== "undefined");
+  assertTest(
+    hasPlaintextPassword === false &&
+    typeof sarprasUser.passwordHash === "string" &&
+    typeof sarprasUser.salt === "string",
+    "Security Audit 1: Bebas Password Plaintext di Kode Sumber",
+    "Hanya Hash SHA-256 + Salt yang Tersimpan"
+  );
+
+  // 2. Verifikasi Integritas Sesi Bertanda Tangan Kriptografis
+  const validAdminSession = createSignedSession(sarprasUser, 2);
+  assertTest(
+    verifySessionIntegrity(validAdminSession) === true &&
+    typeof validAdminSession.signatureHash === "string" &&
+    validAdminSession.expiresAt > Date.now(),
+    "Security Audit 2a: Pembuatan Sesi Bertanda Tangan Digital Berhasil",
+    `Signature: ${validAdminSession.signatureHash.slice(0, 16)}...`
+  );
+
+  // 3. Uji Anti-Tampering: Serangan manipulasi role secara paksa di storage
+  const tamperedSession = {
+    ...validAdminSession,
+    role: "guest",
+  };
+  assertTest(
+    verifySessionIntegrity(tamperedSession) === false,
+    "Security Audit 2b: Anti-Tampering Berhasil Menolak Manipulasi Role DevTools",
+    "Pemeriksaan Checksum Integritas Gagal Sesuai Harapan"
+  );
+
+  // 4. Uji Kedaluwarsa Sesi (Expiring Signed Session Token)
+  const expiredSession = {
+    ...validAdminSession,
+    expiresAt: Date.now() - 5000,
+  };
+  assertTest(
+    verifySessionIntegrity(expiredSession) === false,
+    "Security Audit 2c: Penolakan Sesi yang Telah Kedaluwarsa",
+    "Expiring Session Token Berhasil Divalidasi"
+  );
+
+  // 5. Uji Parameter Auth URL (?auth=<idToken>)
+  const cleanEndpoint = "https://classsense-6ef75-default-rtdb.asia-southeast1.firebasedatabase.app/rooms.json";
+  const urlWithoutAuth = buildFirebaseEndpoint(cleanEndpoint, null);
+  const testIdToken = "firebase_jwt_token_sample_12345";
+  const urlWithAuth = buildFirebaseEndpoint(cleanEndpoint, testIdToken);
+  assertTest(
+    urlWithoutAuth === cleanEndpoint &&
+    urlWithAuth.includes("?auth=firebase_jwt_token_sample_12345"),
+    "Security Audit 3: Operasi Tulis Firebase Menyertakan ?auth=<idToken>",
+    `Target: ${urlWithAuth}`
   );
 
   // --------------------------------------------------------------------------

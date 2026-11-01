@@ -1,0 +1,43 @@
+{
+  "rules": {
+    "rooms": {
+      ".read": true,
+      ".write": "auth != null",
+      "$roomId": {
+        ".validate": "newData.hasChildren(['temp', 'humidity', 'co2', 'pm25'])",
+        "temp": {
+          ".validate": "newData.isNumber() && newData.val() >= 10 && newData.val() <= 50"
+        },
+        "humidity": {
+          ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 100"
+        },
+        "co2": {
+          ".validate": "newData.isNumber() && newData.val() >= 300 && newData.val() <= 5000"
+        },
+        "pm25": {
+          ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 500"
+        },
+        "lux": {
+          ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 10000"
+        },
+        "occupancyCount": {
+          ".validate": "newData.isNumber() && newData.val() >= 0"
+        },
+        "isOccupied": {
+          ".validate": "newData.isBoolean()"
+        },
+        "acActive": {
+          ".validate": "newData.isBoolean()"
+        },
+        "lightsActive": {
+          ".validate": "newData.isBoolean()"
+        }
+      }
+    },
+    "audit_logs": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    }
+  }
+}
+

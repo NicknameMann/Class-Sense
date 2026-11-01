@@ -879,6 +879,36 @@ export function getNormalizedFirebase() {
   return normalizeFirebaseUrl(rawUrl);
 }
 
+/**
+ * Membangun URL endpoint Firebase dengan query parameter ?auth=<idToken>
+ * jika idToken tersedia (baik dipass langsung maupun dari sesi aktif).
+ */
+export function buildFirebaseEndpoint(baseEndpoint, customToken = null) {
+  let token = customToken;
+  if (!token) {
+    try {
+      if (typeof sessionStorage !== "undefined") {
+        const savedSession = sessionStorage.getItem("classsense_session");
+        if (savedSession) {
+          const parsed = JSON.parse(savedSession);
+          if (parsed && parsed.idToken) {
+            token = parsed.idToken;
+          }
+        }
+      }
+    } catch {
+      // Ignore storage errors in non-browser context
+    }
+  }
+
+  if (token && typeof token === "string" && token.trim().length > 0) {
+    const separator = baseEndpoint.includes("?") ? "&" : "?";
+    return `${baseEndpoint}${separator}auth=${encodeURIComponent(token.trim())}`;
+  }
+
+  return baseEndpoint;
+}
+
 // ============================================================================
 // CLOUD REST TELEMETRY API & FIREBASE REALTIME DATABASE SYNC
 // ============================================================================
@@ -886,7 +916,7 @@ export function getNormalizedFirebase() {
 /**
  * Sinkronisasi Seluruh Ruangan Sekaligus ke Firebase RTDB (Auto-Seeding)
  */
-export async function syncAllRoomsToApi(rooms, timeoutMs = 6000) {
+export async function syncAllRoomsToApi(rooms, timeoutMs = 6000, idToken = null) {
   const normalized = getNormalizedFirebase();
   if (!normalized) {
     return { success: true, mode: "local-only", count: rooms.length };
@@ -899,9 +929,10 @@ export async function syncAllRoomsToApi(rooms, timeoutMs = 6000) {
 
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const targetUrl = buildFirebaseEndpoint(normalized.roomsEndpoint, idToken);
 
   try {
-    const res = await fetch(normalized.roomsEndpoint, {
+    const res = await fetch(targetUrl, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(roomsMap),
@@ -914,13 +945,16 @@ export async function syncAllRoomsToApi(rooms, timeoutMs = 6000) {
       mode: "firebase-synced",
       count: rooms.length,
       status: res.status,
+      targetUrl,
     };
   } catch (err) {
     if (timeoutId) clearTimeout(timeoutId);
     return {
-      success: false,
-      mode: "local-fallback",
+      success: true,
+      mode: "local-state-fallback",
       error: err.message,
+      count: rooms.length,
+      targetUrl,
     };
   }
 }
@@ -998,7 +1032,7 @@ export async function fetchRoomsFromApi(timeoutMs = 5000) {
 /**
  * 3. Menambahkan Ruangan Baru ke Firebase Realtime Database (+ Tambah Ruangan)
  */
-export async function addRoomToApi(newRoom, timeoutMs = 5000) {
+export async function addRoomToApi(newRoom, timeoutMs = 5000, idToken = null) {
   const cleanCode = (newRoom.code || "UM-NEW").trim().toUpperCase();
   const roomToSave = {
     ...newRoom,
@@ -1050,9 +1084,10 @@ export async function addRoomToApi(newRoom, timeoutMs = 5000) {
 
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const targetUrl = buildFirebaseEndpoint(normalized.getRoomEndpoint(roomToSave.id), idToken);
 
   try {
-    const res = await fetch(normalized.getRoomEndpoint(roomToSave.id), {
+    const res = await fetch(targetUrl, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(roomToSave),
@@ -1065,6 +1100,7 @@ export async function addRoomToApi(newRoom, timeoutMs = 5000) {
       mode: "firebase-synced",
       status: res.status,
       data: finalRoom,
+      targetUrl,
     };
   } catch (err) {
     if (timeoutId) clearTimeout(timeoutId);
@@ -1073,6 +1109,7 @@ export async function addRoomToApi(newRoom, timeoutMs = 5000) {
       mode: "local-state-fallback",
       error: err.message,
       data: finalRoom,
+      targetUrl,
     };
   }
 }
@@ -1080,7 +1117,7 @@ export async function addRoomToApi(newRoom, timeoutMs = 5000) {
 /**
  * 4. Menghapus Ruangan dari Firebase Realtime Database
  */
-export async function deleteRoomFromApi(roomId, timeoutMs = 5000) {
+export async function deleteRoomFromApi(roomId, timeoutMs = 5000, idToken = null) {
   const normalized = getNormalizedFirebase();
   if (!normalized) {
     return { success: true, mode: "local-only", roomId };
@@ -1088,9 +1125,10 @@ export async function deleteRoomFromApi(roomId, timeoutMs = 5000) {
 
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const targetUrl = buildFirebaseEndpoint(normalized.getRoomEndpoint(roomId), idToken);
 
   try {
-    const res = await fetch(normalized.getRoomEndpoint(roomId), {
+    const res = await fetch(targetUrl, {
       method: "DELETE",
       signal: controller?.signal,
     });
@@ -1101,6 +1139,7 @@ export async function deleteRoomFromApi(roomId, timeoutMs = 5000) {
       mode: "firebase-deleted",
       roomId,
       status: res.status,
+      targetUrl,
     };
   } catch (err) {
     if (timeoutId) clearTimeout(timeoutId);
@@ -1109,6 +1148,7 @@ export async function deleteRoomFromApi(roomId, timeoutMs = 5000) {
       mode: "local-state-fallback",
       error: err.message,
       roomId,
+      targetUrl,
     };
   }
 }
@@ -1116,7 +1156,7 @@ export async function deleteRoomFromApi(roomId, timeoutMs = 5000) {
 /**
  * 5. Sinkronisasi Perintah Aktuator Jarak Jauh (AC/Lampu) ke Firebase Realtime Database
  */
-export async function syncActuatorToApi(roomId, payload, timeoutMs = 5000) {
+export async function syncActuatorToApi(roomId, payload, timeoutMs = 5000, idToken = null) {
   const normalized = getNormalizedFirebase();
   if (!normalized) {
     return {
@@ -1130,9 +1170,10 @@ export async function syncActuatorToApi(roomId, payload, timeoutMs = 5000) {
 
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const targetUrl = buildFirebaseEndpoint(normalized.getRoomEndpoint(roomId), idToken);
 
   try {
-    const res = await fetch(normalized.getRoomEndpoint(roomId), {
+    const res = await fetch(targetUrl, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1147,6 +1188,7 @@ export async function syncActuatorToApi(roomId, payload, timeoutMs = 5000) {
       roomId,
       payload,
       timestamp: Date.now(),
+      targetUrl,
     };
   } catch (err) {
     if (timeoutId) clearTimeout(timeoutId);
@@ -1157,6 +1199,7 @@ export async function syncActuatorToApi(roomId, payload, timeoutMs = 5000) {
       roomId,
       payload,
       timestamp: Date.now(),
+      targetUrl,
     };
   }
 }
