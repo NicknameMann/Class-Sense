@@ -114,6 +114,32 @@ Jalankan server development, lalu buka `http://localhost:3000` di Chrome, Firefo
 
 Ruangan dan favorit disimpan di `localStorage`. Untuk mengulang dari data awal, buka **Developer Tools > Application/Storage > Local Storage**, hapus data situs `localhost:3000`, lalu muat ulang halaman.
 
+## 🔐 Role-Based Access Control (RBAC) & Autentikasi Pengguna
+
+Aplikasi ClassSense mengimplementasikan sistem otorisasi bertingkat (*Role-Based Access Control*) untuk memastikan hanya pengguna yang memiliki wewenang sah yang dapat melakukan perubahan pengaturan, pengendalian aktuator, dan konfigurasi simulator telemetri.
+
+### 1. Kredensial Akun Bawaan (Demo Presets):
+
+| Role / Tingkatan | Email / Identifier | Kata Sandi | Nama Pengguna | Wewenang & Hak Akses |
+|---|---|---|---|---|
+| **Staf Sarpras (Admin)** | `sarpras@um.ac.id` / `198005122008121002` | `admin123` | **Ir. Bambang S., M.T.** | • **Kendali Aktuator Jarak Jauh (AC & Lampu)**<br>• **Master Shutdown Fasilitas Kampus**<br>• **Akses Panel Simulator IoT ESP32**<br>• Reservasi Ruang Kuliah & Pelaporan |
+| **Mahasiswa FT** | `mahasiswa@um.ac.id` / `240535615714` | `mhs123` | **Yudhistira Baraendra Rafi Agrapana** | • Pemantauan Lingkungan & Kualitas Udara Real-Time<br>• Pencarian Ruangan Typo-Tolerant<br>• **Reservasi Ruang Kuliah (Booking Belajar Mandiri)**<br>• Pelaporan Kendala Fasilitas<br>*(Terkunci untuk kontrol aktuator AC/lampu & simulator)* |
+| **Tamu / Publik** | `guest@um.ac.id` | *(Tanpa kata sandi)* | **Tamu / Civitas Akademika** | • Mode baca publik (*read-only* telemetri mikro ruangan)<br>*(Terkunci untuk booking ruangan & kontrol aktuator)* |
+
+### 2. Cara Menguji Otorisasi di Hadapan Dosen:
+1. **Uji Pembatasan Hak Akses (Role Mahasiswa):**
+   - Buka profil pengguna (klik avatar di pojok kanan atas) dan pilih **"Beralih ke Mahasiswa FT"** (atau login dengan NIM `240535615714` / `mhs123`).
+   - Coba tekan tombol *"Matikan AC Jarak Jauh"* di Tab 4 Audit Energi atau tombol *"IoT Demo Control"* di pojok kanan bawah.
+   - **Hasil:** Aplikasi langsung mencegat aksi (*authorization guard*) dan menampilkan **Halaman Login & Peringatan Hak Akses Diperlukan**.
+2. **Uji Eksekusi Sukses (Role Staf Sarpras):**
+   - Di Halaman Login atau Modal Profil, pilih **"Staf Sarpras FT (Hak Penuh Admin)"** (atau login dengan `sarpras@um.ac.id` / `admin123`).
+   - Tekan kembali tombol *"Matikan AC Ruangan Kosong Sekaligus"*.
+   - **Hasil:** Perintah dieksekusi dengan sukses dan disinkronkan secara langsung ke state API telemetri!
+3. **Penyimpanan Sesi:**
+   - Sesi pengguna aktif tersimpan secara persisten di `localStorage ("classsense_auth_user")`.
+
+---
+
 ## 🔌 Integrasi Data (REST API Nyata & Cloud Telemetry)
 
 Aplikasi telah mengintegrasikan komunikasi HTTP/REST API nyata yang berjalan secara hybrid:
@@ -123,15 +149,41 @@ Aplikasi telah mengintegrasikan komunikasi HTTP/REST API nyata yang berjalan sec
    - **Endpoint Kualitas Udara:** `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=-7.9612&longitude=112.6175&current=pm2_5,us_aqi,carbon_monoxide`
    - Berfungsi sebagai **Kalibrasi Iklim Luar Kampus FT UM** aktual (Suhu luar, kelembapan, $\text{PM}_{2.5}$, US AQI, CO) yang ditampilkan pada kartu Beranda dan Analitik, serta digunakan sebagai acuan baseline kondisi ambien telemetri mikro ruangan.
 
-2. **Cloud REST Telemetry Endpoint & Graceful Fallback (`fetchRoomsFromApi`):**
-   - Mendukung variabel lingkungan `VITE_IOT_API_URL` (misal: Firebase Realtime Database REST API `https://<project-id>.firebaseio.com/rooms.json` atau REST server kampus).
-   - Dilengkapi mekanisme *graceful fallback* otomatis ke data simulator lokal ber-state jika endpoint eksternal belum disetel atau perangkat sedang offline.
+2. **Firebase Realtime Database REST API (`classsense-6ef75-default-rtdb`):**
+   - **Endpoint Terverifikasi:** `https://classsense-6ef75-default-rtdb.asia-southeast1.firebasedatabase.app` (region `asia-southeast1`).
+   - Disimpan di file `.env` sebagai `VITE_IOT_API_URL`.
+   - **Smart URL Normalizer (`normalizeFirebaseUrl`):** Mendeteksi dan mengekstrak nama database secara otomatis dari URL Firebase Console (`console.firebase.google.com/.../database/<db-name>...`) maupun URL langsung, lalu membangun endpoint REST valid `/rooms.json` dan `/rooms/<roomId>.json`.
+   - **Auto-Seeding:** Jika database Firebase masih kosong (`null`), sistem secara otomatis melakukan seeding seluruh data ruangan Kampus Universitas Negeri Malang (UM) menggunakan HTTP `PUT`.
 
 3. **Sinkronisasi Perintah Aktuator Jarak Jauh (`syncActuatorToApi`):**
-   - Mengirim perintah HTTP `PATCH` / `PUT` secara real-time saat pengguna menekan tombol *"Matikan AC Jarak Jauh"*, *"Padamkan Lampu Koridor"*, maupun saat melakukan reservasi ruangan.
+   - Mengirim perintah HTTP `PATCH` secara real-time ke Firebase RTDB saat pengguna menekan tombol *"Matikan AC Jarak Jauh"*, *"Padamkan Lampu Koridor"*, maupun saat melakukan reservasi ruangan.
 
-4. **Monitoring & Trigger Sinkronisasi di UI:**
-   - Tersedia status bar di bagian atas aplikasi: `API Connected • Open-Meteo & IoT Telemetry Sync` beserta jam sinkronisasi terakhir dan tombol interaktif **"Sync API Sekarang"**.
-   - Pada panel **IoT Demo Control**, tersedia tombol *"🌐 Kalibrasi Sensor dari Live Open-Meteo API"* untuk menyinkronkan seluruh parameter ruangan dengan cuaca Kota Malang secara instan.
+4. **Fitur "+ Tambah Ruangan" (Create Room) & Penghapusan:**
+   - Tersedia tombol **"+ Tambah Ruang Kuliah / Lab UM"** di Tab Ruangan dan tombol pintasan di Tab Beranda (khusus akun Staf Sarpras Admin).
+   - Modal form lengkap mencakup Kode Ruangan, Nama Ruang, Gedung UM (otomatis mengisi koordinat GPS asli), Lantai, Kategori, Kapasitas, Fasilitas, dan nilai awal sensor IoT.
+   - Fungsi `addRoomToApi()` langsung menghitung metrik on-device compute (EPA AQI, Rothfusz Heat Index, Haversine Distance) dan mengirimkan HTTP `PUT` ke Firebase RTDB.
+   - Fitur hapus ruangan (`deleteRoomFromApi()`) dengan konfirmasi modal untuk menghapus data dari cloud via HTTP `DELETE`.
+
+---
+
+## 🏛️ Dataset Gedung & Ruangan Kampus Universitas Negeri Malang (UM)
+
+Seluruh data ruangan telah disesuaikan dengan lingkungan nyata Fakultas Teknik (FT) dan Kampus Utama UM (Jl. Semarang No. 5 Malang):
+- **Gedung B12 FT (DTEI):** `B12-204` (Lab Jaringan & Mobile Computing - Anomali CO2 Kritis >1100 ppm), `B12-101` (Ruang Teori DTEI), `B12-302` (Lab Pemrograman & RPL - Anomali Pemborosan AC).
+- **Gedung B11 FT (Dekanat & Aula):** `B11-201` (Ruang Seminar Utama FT - Best Match SAW Rekomendasi Teratas), `B11-301` (Auditorium Dekanat FT).
+- **Gedung Kuliah Bersama (GKB):** `A19-302` (Smart Classroom GKB A19), `A20-204` (Ruang Kuliah Besar GKB A20), `A20-401` (Ruang Seminar Nasional GKB A20).
+- **Gedung B3 FT (Workshop Teknik):** `B3-101` (Workshop Robotika & Otomasi), `B3-203` (Lab Bahasa Teknik).
+- **Perpustakaan Pusat & Rektorat:** `PERPUS-104` (Ruang Diskusi Kolaboratif Perpustakaan UM), `A1-401` (Ruang Rapat Senat Rektorat A1).
+- **Koridor Kampus:** `KORIDOR-B12` / `K-WEST` (Koridor Sayap Barat Gedung B12 - Anomali Pemborosan Lampu >500 Lux).
+
+---
+
+## 🤖 CI/CD Kompilasi APK Otomatis (GitHub Actions & Releases)
+
+File workflow `.github/workflows/build-apk.yml` telah dikonfigurasi untuk:
+1. Menjalankan `npm run build` dan `npx cap sync android` secara otomatis saat commit di-push ke branch `main`/`develop` atau saat dipicu manual (*workflow dispatch*).
+2. Mengompilasi APK debug menggunakan Node 20, Java JDK 21 Temurin, dan Android SDK (`./gradlew assembleDebug`).
+3. Mengunggah file artifact APK (`app-debug.apk`) ke GitHub Artifacts (tersedia 30 hari).
+4. **Publikasi Otomatis ke GitHub Releases:** Begitu branch `main` menerima update, action `softprops/action-gh-release@v2` akan memublikasikan rilis baru dengan tag `v1.0.<run_number>` yang berisi file unduhan langsung `app-debug.apk`.
 
 

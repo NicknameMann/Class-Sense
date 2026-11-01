@@ -16,12 +16,51 @@ import {
   fetchCampusOutdoorClimate,
   fetchRoomsFromApi,
   syncActuatorToApi,
+  addRoomToApi,
+  deleteRoomFromApi,
+  normalizeFirebaseUrl,
+  RAW_CAMPUS_ROOMS,
   DEFAULT_OUTDOOR_CLIMATE,
 } from "../src/services/iotSimulatorApi.js";
 
+import {
+  authenticateUser,
+  checkPermission,
+  REGISTERED_USERS,
+  GUEST_USER,
+} from "../src/services/authService.js";
+
+const MOCK_FIREBASE_URL = "https://classsense-test.invalid";
+
+async function withMockApi(mockFetch, callback) {
+  const originalFetch = globalThis.fetch;
+  const originalApiUrl = process.env.VITE_IOT_API_URL;
+  globalThis.fetch = mockFetch;
+  process.env.VITE_IOT_API_URL = MOCK_FIREBASE_URL;
+
+  try {
+    return await callback();
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiUrl === undefined) {
+      delete process.env.VITE_IOT_API_URL;
+    } else {
+      process.env.VITE_IOT_API_URL = originalApiUrl;
+    }
+  }
+}
+
+function jsonResponse(body, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  };
+}
+
 async function runTestSuite() {
   console.log("================================================================================");
-  console.log("🧪 CLASSSENSE TEST SUITE: 10 MOBILE ALGORITHMS & REST API INTEGRATION");
+  console.log("🧪 CLASSSENSE TEST SUITE: ALGORITHMS, API, FIREBASE & RBAC");
   console.log("================================================================================\n");
 
   let passedTests = 0;
@@ -175,13 +214,25 @@ async function runTestSuite() {
   // 11. REST API: Open-Meteo Weather & Air Quality HTTP GET Integration
   // --------------------------------------------------------------------------
   console.log("\n📡 Menguji HTTP GET Request ke Open-Meteo Weather & Air Quality API...");
-  const climateResult = await fetchCampusOutdoorClimate(4000);
+  const climateRequests = [];
+  const climateResult = await withMockApi(
+    async (url) => {
+      climateRequests.push(url);
+      if (url.includes("air-quality")) {
+        return jsonResponse({ current: { pm2_5: 12.3, us_aqi: 42, carbon_monoxide: 378 } });
+      }
+      return jsonResponse({ current: { temperature_2m: 24.1, relative_humidity_2m: 58 } });
+    },
+    () => fetchCampusOutdoorClimate(4000)
+  );
   assertTest(
     typeof climateResult.temp === "number" &&
     typeof climateResult.humidity === "number" &&
     typeof climateResult.usAqi === "number" &&
     typeof climateResult.pm25 === "number" &&
-    climateResult.source.includes("Open-Meteo"),
+    climateResult.source.includes("Open-Meteo REST API") &&
+    climateResult.isLive === true &&
+    climateRequests.length === 2,
     "REST API 1: Open-Meteo Live API / Graceful Fallback",
     `Suhu Luar: ${climateResult.temp}°C, Lembap: ${climateResult.humidity}%, AQI: ${climateResult.usAqi}, Sumber: ${climateResult.source}`
   );
@@ -190,26 +241,251 @@ async function runTestSuite() {
   // 12. REST API: Cloud REST Telemetry Endpoint & Fallback
   // --------------------------------------------------------------------------
   console.log("📡 Menguji Cloud REST Telemetry Endpoint Fetching & Fallback...");
-  const roomsApiResult = await fetchRoomsFromApi(3000);
+  let roomsRequest;
+  const roomsApiResult = await withMockApi(
+    async (url, options) => {
+      roomsRequest = { url, options };
+      return jsonResponse({ "ROOM-TEST": { name: "Ruang Uji", temp: 23.5 } });
+    },
+    () => fetchRoomsFromApi(3000)
+  );
   assertTest(
     roomsApiResult.success === true &&
+    roomsApiResult.isLiveApi === true &&
     Array.isArray(roomsApiResult.data) &&
-    roomsApiResult.data.length > 0,
+    roomsApiResult.data.length === 1 &&
+    roomsApiResult.data[0].id === "ROOM-TEST" &&
+    roomsRequest.options.method === "GET" &&
+    roomsRequest.url === `${MOCK_FIREBASE_URL}/rooms.json`,
     "REST API 2: fetchRoomsFromApi (Cloud REST / Local Fallback)",
     `Jumlah Ruangan: ${roomsApiResult.data.length}, Sumber: ${roomsApiResult.source}`
+  );
+
+  const fallbackRooms = await withMockApi(
+    async () => { throw new Error("mock offline"); },
+    () => fetchRoomsFromApi(3000)
+  );
+  assertTest(
+    fallbackRooms.success === true &&
+    fallbackRooms.isLiveApi === false &&
+    fallbackRooms.data.length === RAW_CAMPUS_ROOMS.length &&
+    fallbackRooms.source.includes("Offline Fallback"),
+    "REST API 2b: Local Fallback saat Cloud API Offline",
+    `Fallback lokal: ${fallbackRooms.data.length} ruangan`
+  );
+
+  let seedRequests = [];
+  const seededRooms = await withMockApi(
+    async (url, options) => {
+      seedRequests.push({ url, options });
+      return options.method === "GET" ? jsonResponse(null) : jsonResponse({});
+    },
+    () => fetchRoomsFromApi(3000)
+  );
+  assertTest(
+    seededRooms.success === true &&
+    seedRequests.length === 2 &&
+    seedRequests[1].options.method === "PUT" &&
+    Object.keys(JSON.parse(seedRequests[1].options.body)).length === RAW_CAMPUS_ROOMS.length,
+    "REST API 2c: Auto-seeding database kosong",
+    `Seed lokal teruji: ${RAW_CAMPUS_ROOMS.length} ruangan ke endpoint mock`
   );
 
   // --------------------------------------------------------------------------
   // 13. REST API: Actuator Dispatch (Remote AC & Lamp Control Sync)
   // --------------------------------------------------------------------------
   console.log("📡 Menguji syncActuatorToApi untuk Pengendalian Jarak Jauh...");
-  const actuatorSyncResult = await syncActuatorToApi("B-302", { acActive: false, temp: 24.5 });
+  const actuatorPayload = { acActive: false, temp: 24.5 };
+  let actuatorRequest;
+  const actuatorSyncResult = await withMockApi(
+    async (url, options) => {
+      actuatorRequest = { url, options };
+      return jsonResponse({});
+    },
+    () => syncActuatorToApi("B-302", actuatorPayload)
+  );
   assertTest(
     actuatorSyncResult.success === true &&
+    actuatorSyncResult.mode === "firebase-synced" &&
     actuatorSyncResult.roomId === "B-302" &&
-    actuatorSyncResult.payload.acActive === false,
+    actuatorSyncResult.payload.acActive === false &&
+    actuatorRequest.options.method === "PATCH" &&
+    JSON.parse(actuatorRequest.options.body).acActive === false,
     "REST API 3: syncActuatorToApi (Remote Actuator Command)",
     `Mode: ${actuatorSyncResult.mode}, Target: ${actuatorSyncResult.roomId}`
+  );
+
+  const rejectedActuator = await withMockApi(
+    async () => jsonResponse({ error: "permission_denied" }, 403),
+    () => syncActuatorToApi("B-302", actuatorPayload)
+  );
+  assertTest(
+    rejectedActuator.success === false && rejectedActuator.status === 403,
+    "REST API 3b: Menandai perintah aktuator yang ditolak server",
+    `HTTP ${rejectedActuator.status}`
+  );
+
+  // --------------------------------------------------------------------------
+  // 14. AUTHENTICATION & ROLE-BASED ACCESS CONTROL (RBAC)
+  // --------------------------------------------------------------------------
+  console.log("\n🔐 Menguji Autentikasi Pengguna & Role-Based Access Control (RBAC)...");
+  
+  // Login Staf Sarpras (Admin) dengan Email
+  const authSarprasEmail = authenticateUser("sarpras@um.ac.id", "admin123");
+  assertTest(
+    authSarprasEmail.success && authSarprasEmail.user.role === "admin",
+    "Auth & RBAC 1: Login Staf Sarpras via Email",
+    `Role: ${authSarprasEmail.user?.role}`
+  );
+
+  // Login Staf Sarpras (Admin) dengan NIP
+  const authSarprasNip = authenticateUser("198005122008121002", "admin123");
+  assertTest(
+    authSarprasNip.success && authSarprasNip.user.nip === "198005122008121002",
+    "Auth & RBAC 2: Login Staf Sarpras via NIP",
+    "Identitas staf diterima"
+  );
+
+  // Login Mahasiswa dengan NIM
+  const authMhs = authenticateUser("240535615714", "mhs123");
+  assertTest(
+    authMhs.success && authMhs.user.role === "mahasiswa",
+    "Auth & RBAC 3: Login Mahasiswa via NIM",
+    `Role: ${authMhs.user?.role}`
+  );
+
+  // Uji Kredensial Salah
+  const authFailed = authenticateUser("sarpras@um.ac.id", "wrong_pass");
+  assertTest(
+    authFailed.success === false && authFailed.user === null,
+    "Auth & RBAC 4: Penolakan Password Salah",
+    `Pesan Error: ${authFailed.error}`
+  );
+
+  // Verifikasi Hak Akses: Staf Sarpras punya hak kendali aktuator & simulator
+  const sarprasUser = REGISTERED_USERS[0];
+  const mhsUser = REGISTERED_USERS[1];
+  assertTest(
+    checkPermission(sarprasUser, "canControlActuators") === true &&
+    checkPermission(sarprasUser, "canAccessSimulator") === true &&
+    checkPermission(sarprasUser, "canAccessAuditManagement") === true,
+    "Auth & RBAC 5: Hak Akses Penuh Staf Sarpras (Admin)",
+    "canControlActuators: true, canAccessSimulator: true"
+  );
+
+  // Verifikasi Pembatasan Hak Akses: Mahasiswa TIDAK berhak mematikan AC & mengutak-atik simulator
+  assertTest(
+    checkPermission(mhsUser, "canControlActuators") === false &&
+    checkPermission(mhsUser, "canAccessSimulator") === false &&
+    checkPermission(mhsUser, "canBookRooms") === true,
+    "Auth & RBAC 6: Hak Akses Terbatas Mahasiswa",
+    "canControlActuators: false (Aman), canBookRooms: true"
+  );
+
+  // Verifikasi Tamu / Publik: Tidak bisa booking
+  assertTest(
+    checkPermission(GUEST_USER, "canBookRooms") === false &&
+    checkPermission(GUEST_USER, "canControlActuators") === false,
+    "Auth & RBAC 7: Pembatasan Pengunjung Tamu/Publik",
+    "canBookRooms: false, canControlActuators: false"
+  );
+
+  // Verifikasi Hak Tambah / Hapus Ruangan (canManageRooms)
+  assertTest(
+    checkPermission(sarprasUser, "canManageRooms") === true &&
+    checkPermission(mhsUser, "canManageRooms") === false &&
+    checkPermission(GUEST_USER, "canManageRooms") === false,
+    "Auth & RBAC 8: Hak Pengelolaan Ruangan (canManageRooms)",
+    "Sarpras: true, Mahasiswa: false, Guest: false"
+  );
+
+  // --------------------------------------------------------------------------
+  // 15. FIREBASE RTDB: Smart URL Normalizer (Firebase Console Link -> REST JSON)
+  // --------------------------------------------------------------------------
+  console.log("\n🔥 Menguji Firebase RTDB URL Normalizer...");
+  const consoleLink = "https://console.firebase.google.com/u/2/project/classsense-6ef75/database/classsense-6ef75-default-rtdb/data/~2F";
+  const normalizedConsole = normalizeFirebaseUrl(consoleLink);
+  assertTest(
+    normalizedConsole.dbName === "classsense-6ef75-default-rtdb" &&
+    normalizedConsole.collectionUrl.includes("classsense-6ef75-default-rtdb") &&
+    normalizedConsole.collectionUrl.endsWith("/rooms.json"),
+    "Firebase RTDB 1: Ekstraksi URL Console Firebase ke REST Endpoint",
+    `Db: ${normalizedConsole.dbName}, Endpoint: ${normalizedConsole.collectionUrl}`
+  );
+
+  const directBase = "https://classsense-6ef75-default-rtdb.asia-southeast1.firebasedatabase.app";
+  const normalizedDirect = normalizeFirebaseUrl(directBase);
+  assertTest(
+    normalizedDirect.collectionUrl === "https://classsense-6ef75-default-rtdb.asia-southeast1.firebasedatabase.app/rooms.json" &&
+    normalizedDirect.itemUrlFn("B12-204") === "https://classsense-6ef75-default-rtdb.asia-southeast1.firebasedatabase.app/rooms/B12-204.json",
+    "Firebase RTDB 2: Resolusi Base URL ke Koleksi dan Dokumen Tunggal",
+    `Single Item: ${normalizedDirect.itemUrlFn("B12-204")}`
+  );
+
+  // --------------------------------------------------------------------------
+  // 16. FIREBASE RTDB: Penambahan Ruangan Baru (+ Tambah Ruangan)
+  // --------------------------------------------------------------------------
+  console.log("🔥 Menguji addRoomToApi (Penambahan Ruangan Baru & Kalkulasi On-Device)...");
+  const testRoomInput = {
+    code: "B12-999",
+    name: "Lab Robotika Lanjut B12",
+    building: "Gedung B12 FT (DTEI)",
+    buildingCode: "B12",
+    floor: "Lantai 3",
+    category: "Lab Komputer / IoT",
+    capacity: 35,
+    occupancyCount: 0,
+    temp: 23.0,
+    humidity: 50,
+    co2: 440,
+    pm25: 8.5,
+    lux: 410,
+    acActive: true,
+    lightsActive: true,
+    facilities: ["WiFi 6", "Smart TV 75\"", "Workstation GPU", "LoRa Node"],
+  };
+
+  let addRoomRequest;
+  const addRoomResult = await withMockApi(
+    async (url, options) => {
+      addRoomRequest = { url, options };
+      return jsonResponse({});
+    },
+    () => addRoomToApi(testRoomInput)
+  );
+  assertTest(
+    addRoomResult.success === true &&
+    addRoomResult.mode === "firebase-synced" &&
+    addRoomResult.data.code === "B12-999" &&
+    typeof addRoomResult.data.aqi === "number" &&
+    typeof addRoomResult.data.heatIndex === "number" &&
+    typeof addRoomResult.data.distanceMeters === "number" &&
+    addRoomRequest.options.method === "PUT" &&
+    addRoomRequest.url === `${MOCK_FIREBASE_URL}/rooms/B12-999.json`,
+    "Firebase RTDB 3: addRoomToApi dengan On-Device Compute Berjalan Nyata",
+    `Ruangan: ${addRoomResult.data.code}, AQI: ${addRoomResult.data.aqi}, Jarak: ${addRoomResult.data.distanceMeters}m`
+  );
+
+  // --------------------------------------------------------------------------
+  // 17. FIREBASE RTDB: Penghapusan Ruangan (Delete Room)
+  // --------------------------------------------------------------------------
+  console.log("🔥 Menguji deleteRoomFromApi...");
+  let deleteRoomRequest;
+  const deleteRoomResult = await withMockApi(
+    async (url, options) => {
+      deleteRoomRequest = { url, options };
+      return jsonResponse({});
+    },
+    () => deleteRoomFromApi("B12-999")
+  );
+  assertTest(
+    deleteRoomResult.success === true &&
+    deleteRoomResult.mode === "firebase-deleted" &&
+    deleteRoomResult.roomId === "B12-999" &&
+    deleteRoomRequest.options.method === "DELETE" &&
+    deleteRoomRequest.url === `${MOCK_FIREBASE_URL}/rooms/B12-999.json`,
+    "Firebase RTDB 4: deleteRoomFromApi (Penghapusan Ruangan)",
+    `Deleted Room ID: ${deleteRoomResult.roomId}`
   );
 
   console.log("\n================================================================================");

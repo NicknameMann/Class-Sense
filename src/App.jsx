@@ -41,7 +41,26 @@ import {
   Globe,
   CloudSun,
   Wifi,
+  Lock,
+  Unlock,
+  KeyRound,
+  User,
+  ShieldAlert,
+  LogIn,
+  LogOut,
+  UserCheck,
+  PlusCircle,
+  Trash2,
 } from "lucide-react";
+
+import LoginPage from "./components/LoginPage";
+import AddRoomModal from "./components/AddRoomModal";
+import {
+  REGISTERED_USERS,
+  GUEST_USER,
+  authenticateUser,
+  checkPermission,
+} from "./services/authService";
 
 import {
   calculateEPA_AQI,
@@ -64,6 +83,10 @@ import {
   fetchCampusOutdoorClimate,
   fetchRoomsFromApi,
   syncActuatorToApi,
+  addRoomToApi,
+  deleteRoomFromApi,
+  syncAllRoomsToApi,
+  UM_CAMPUS_BUILDINGS,
   DEFAULT_OUTDOOR_CLIMATE,
 } from "./services/iotSimulatorApi";
 
@@ -97,8 +120,12 @@ export default function App() {
   const [selectedBuilding, setSelectedBuilding] = useState("Semua Gedung");
   const [roomStatusFilter, setRoomStatusFilter] = useState("Semua"); // "Semua" | "Kosong" | "Terisi"
   const [roomViewMode, setRoomViewMode] = useState("daftar"); // "daftar" | "denah"
-  const [selectedAnalyticsRoomId, setSelectedAnalyticsRoomId] = useState("A-101");
+  const [selectedAnalyticsRoomId, setSelectedAnalyticsRoomId] = useState("B12-101");
   const [analyticsTimeframe, setAnalyticsTimeframe] = useState("harian"); // "harian" | "mingguan"
+
+  // State Tambah & Hapus Ruangan (Firebase RTDB Live Sync)
+  const [showAddRoomModal, setShowAddRoomModal] = useState(false);
+  const [roomToDelete, setRoomToDelete] = useState(null);
 
   // Algoritma 3: Bobot Preferensi SAW yang dapat diubah dinamis oleh pengguna
   const [sawWeights, setSawWeights] = useState({
@@ -141,12 +168,36 @@ export default function App() {
   // REST API State (Open-Meteo Weather & Cloud Telemetry Endpoint)
   const [outdoorClimate, setOutdoorClimate] = useState(DEFAULT_OUTDOOR_CLIMATE);
   const [apiConnectionStatus, setApiConnectionStatus] = useState({
-    isConnected: true,
+    isConnected: false,
     isLive: false,
     source: "Menghubungkan ke Open-Meteo REST API...",
     lastSyncTime: "Menghubungkan...",
     isSyncing: false,
   });
+
+  // Role-Based Access Control (RBAC) & Sesi Pengguna
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem("classsense_auth_user");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error(e);
+    }
+    // Default Staf Sarpras (Admin) agar seluruh fitur demonstrasi dosen langsung aktif
+    return REGISTERED_USERS[0];
+  });
+  const [showLoginModal, setShowLoginModal] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [permissionPromptMessage, setPermissionPromptMessage] = useState(null);
+
+  // Simpan Sesi Pengguna ke LocalStorage
+  useEffect(() => {
+    if (currentUser) {
+      localStorage.setItem("classsense_auth_user", JSON.stringify(currentUser));
+    } else {
+      localStorage.removeItem("classsense_auth_user");
+    }
+  }, [currentUser]);
 
   // Simpan ke LocalStorage saat ada perubahan
   useEffect(() => {
@@ -165,6 +216,20 @@ export default function App() {
     }, 3200);
   }, []);
 
+  const showWriteOutcome = (results, messages) => {
+    const writes = (Array.isArray(results) ? results : [results]).filter(Boolean);
+    if (writes.some((result) => result.success === false)) {
+      showToast(messages.rejected);
+    } else if (
+      writes.length > 0 &&
+      writes.every((result) => result.mode === "firebase-synced" || result.mode === "firebase-deleted")
+    ) {
+      showToast(messages.synced);
+    } else {
+      showToast(messages.local);
+    }
+  };
+
   // Fungsi Sinkronisasi Nyata HTTP REST API (Open-Meteo & Cloud IoT)
   const syncAllApis = useCallback(async (manual = false) => {
     setApiConnectionStatus((prev) => ({ ...prev, isSyncing: true }));
@@ -179,26 +244,31 @@ export default function App() {
         setRawRooms(cloudRooms.data);
       }
 
+      const liveSources = [];
+      if (climate.isLive) liveSources.push("Open-Meteo");
+      if (cloudRooms.isLiveApi) liveSources.push("Firebase RTDB");
+      const isLive = liveSources.length > 0;
+
       setApiConnectionStatus({
-        isConnected: true,
-        isLive: climate.isLive || cloudRooms.isLiveApi,
-        source: cloudRooms.isLiveApi ? cloudRooms.source : climate.source,
+        isConnected: isLive,
+        isLive,
+        source: isLive ? liveSources.join(" + ") : "Data lokal (fallback)",
         lastSyncTime: climate.lastSync,
         isSyncing: false,
       });
 
       if (manual) {
-        showToast(
-          climate.isLive
-            ? `Sinkronisasi REST API Berhasil! Iklim Luar UM: ${climate.temp}°C, AQI: ${climate.usAqi}`
-            : "Sinkronisasi selesai (Mode Fallback Terkalibrasi)."
-        );
+        showToast(isLive
+          ? `Sinkronisasi berhasil: ${liveSources.join(" + ")}.`
+          : "API tidak terjangkau; data lokal dan simulasi tetap digunakan.");
       }
     } catch (err) {
       setApiConnectionStatus((prev) => ({
         ...prev,
+        isConnected: false,
+        isLive: false,
         isSyncing: false,
-        source: "Open-Meteo Cache (Offline Fallback)",
+        source: "Data lokal (fallback)",
       }));
       if (manual) showToast("Sinkronisasi gagal, menggunakan cache lokal.");
     }
@@ -304,9 +374,14 @@ export default function App() {
   const filteredRooms = useMemo(() => {
     let result = computedRooms;
 
-    // Filter Gedung
+    // Filter Gedung Kampus UM
     if (selectedBuilding !== "Semua Gedung") {
-      result = result.filter((r) => r.buildingCode === selectedBuilding.replace("Gedung ", ""));
+      const codeClean = selectedBuilding.replace("Gedung ", "").replace("GKB ", "").trim();
+      result = result.filter(
+        (r) =>
+          r.buildingCode === codeClean ||
+          (r.building && r.building.toLowerCase().includes(codeClean.toLowerCase()))
+      );
     }
 
     // Filter Kategori (Beranda / Ruangan)
@@ -389,32 +464,149 @@ export default function App() {
   }, [currentAnalyticsRoom]);
 
   // --------------------------------------------------------------------------
-  // HANDLERS KONTROL AKSI JARAK JAUH & DEMO
+  // HANDLERS KONTROL AKSI JARAK JAUH & DEMO (DILINDUNGI RBAC)
   // --------------------------------------------------------------------------
   const handleTurnOffSingleAC = async (roomId) => {
+    if (!checkPermission(currentUser, "canControlActuators")) {
+      setPermissionPromptMessage(
+        `Akses Terbatas: Anda saat ini masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Fitur pemadaman AC jarak jauh hanya dapat dieksekusi oleh Staf Sarpras (Admin FT UM).`
+      );
+      setShowLoginModal(true);
+      return;
+    }
     setRawRooms((prev) =>
       prev.map((r) => (r.id === roomId ? { ...r, acActive: false, temp: 24.5 } : r))
     );
-    await syncActuatorToApi(roomId, { acActive: false, temp: 24.5 });
-    showToast(`AC pada ruangan ${roomId} berhasil dimatikan (HTTP Sync).`);
+    const result = await syncActuatorToApi(roomId, { acActive: false, temp: 24.5 });
+    showWriteOutcome(result, {
+      synced: `AC pada ruangan ${roomId} dimatikan dan tersinkron ke Firebase.`,
+      local: `AC pada ruangan ${roomId} dimatikan di aplikasi; Firebase belum tersinkron.`,
+      rejected: `Firebase menolak perintah AC ${roomId}; perubahan hanya terlihat lokal.`,
+    });
   };
 
   const handleTurnOffAllAC = async () => {
+    if (!checkPermission(currentUser, "canControlActuators")) {
+      setPermissionPromptMessage(
+        `Akses Terbatas: Anda masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Master Shutdown AC fasilitas kampus hanya diizinkan untuk Staf Sarpras (Admin FT UM).`
+      );
+      setShowLoginModal(true);
+      return;
+    }
+    const targetRooms = rawRooms.filter((room) => !room.isOccupied && room.acActive);
+    if (targetRooms.length === 0) {
+      showToast("Tidak ada AC aktif di ruangan kosong.");
+      return;
+    }
     setRawRooms((prev) =>
-      prev.map((r) => (!r.isOccupied ? { ...r, acActive: false, temp: 24.5 } : r))
+      prev.map((room) =>
+        !room.isOccupied && room.acActive ? { ...room, acActive: false, temp: 24.5 } : room
+      )
     );
-    await Promise.all(
-      anomalyRooms.map((r) => syncActuatorToApi(r.id, { acActive: false, temp: 24.5 }))
+    const results = await Promise.all(
+      targetRooms.map((room) => syncActuatorToApi(room.id, { acActive: false, temp: 24.5 }))
     );
-    showToast("Semua AC di ruangan kosong berhasil dipadamkan sekaligus (HTTP Sync)!");
+    showWriteOutcome(results, {
+      synced: "AC aktif di ruangan kosong dipadamkan dan tersinkron ke Firebase.",
+      local: "AC aktif di ruangan kosong dipadamkan lokal; Firebase belum tersinkron.",
+      rejected: "Sebagian perintah AC ditolak Firebase; tampilan lokal sudah diperbarui.",
+    });
   };
 
   const handleTurnOffCorridorLamps = async () => {
+    if (!checkPermission(currentUser, "canControlActuators")) {
+      setPermissionPromptMessage(
+        `Akses Terbatas: Anda masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Pemadaman lampu koridor fasilitas kampus memerlukan wewenang Staf Sarpras (Admin FT UM).`
+      );
+      setShowLoginModal(true);
+      return;
+    }
     setRawRooms((prev) =>
-      prev.map((r) => (r.id === "K-WEST" ? { ...r, lightsActive: false, lux: 420 } : r))
+      prev.map((r) =>
+        r.id === "K-WEST"
+          ? { ...r, lightsActive: false, lux: 420 }
+          : r
+      )
     );
-    await syncActuatorToApi("K-WEST", { lightsActive: false, lux: 420 });
-    showToast("Lampu Koridor Sayap Barat berhasil dipadamkan (HTTP Sync)!");
+    const result = await syncActuatorToApi("K-WEST", { lightsActive: false, lux: 420 });
+    showWriteOutcome(result, {
+      synced: "Lampu Koridor Sayap Barat dipadamkan dan tersinkron ke Firebase.",
+      local: "Lampu koridor dipadamkan lokal; Firebase belum tersinkron.",
+      rejected: "Firebase menolak perintah lampu koridor; perubahan hanya terlihat lokal.",
+    });
+  };
+
+  const handleOpenSimulator = () => {
+    if (!checkPermission(currentUser, "canAccessSimulator")) {
+      setPermissionPromptMessage(
+        `Akses Terbatas: Anda masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Simulator Telemetri IoT ESP32 (manipulasi nilai sensor dan pengujian algoritma) dibatasi untuk Staf Sarpras / Penguji Dosen.`
+      );
+      setShowLoginModal(true);
+      return;
+    }
+    setIsSimulatorOpen(true);
+  };
+
+  // --------------------------------------------------------------------------
+  // HANDLERS TAMBAH & HAPUS RUANGAN (FIREBASE RTDB LIVE SYNC)
+  // --------------------------------------------------------------------------
+  const handleOpenAddRoomModal = () => {
+    if (!checkPermission(currentUser, "canManageRooms")) {
+      setPermissionPromptMessage(
+        `Akses Terbatas: Anda saat ini masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Fitur penambahan ruangan baru kampus UM memerlukan wewenang Staf Sarpras (Admin FT UM).`
+      );
+      setShowLoginModal(true);
+      return;
+    }
+    setShowAddRoomModal(true);
+  };
+
+  const handleAddRoomSubmit = async (newRoomData) => {
+    const result = await addRoomToApi(newRoomData);
+    if (result.success) {
+      const savedRoom = result.data;
+      setRawRooms((prev) => [savedRoom, ...prev.filter((r) => r.id !== savedRoom.id)]);
+      setSelectedAnalyticsRoomId(savedRoom.id);
+      showWriteOutcome(result, {
+        synced: `Ruangan ${savedRoom.code} ditambahkan dan tersinkron ke Firebase.`,
+        local: `Ruangan ${savedRoom.code} ditambahkan lokal; Firebase belum tersinkron.`,
+        rejected: `Firebase menolak penyimpanan ruangan ${savedRoom.code}.`,
+      });
+    } else {
+      throw new Error(result.error || "Gagal menyimpan ruangan ke Firebase");
+    }
+  };
+
+  const handleDeleteRoom = async (roomId) => {
+    if (!checkPermission(currentUser, "canManageRooms")) {
+      setPermissionPromptMessage(
+        `Akses Terbatas: Anda saat ini masuk sebagai "${currentUser?.name || "Tamu"}" (${currentUser?.roleBadge || "Bukan Admin"}). Fitur penghapusan ruangan dari Firebase RTDB dibatasi untuk Staf Sarpras (Admin FT UM).`
+      );
+      setShowLoginModal(true);
+      return;
+    }
+
+    const roomTarget = rawRooms.find((r) => r.id === roomId);
+    const roomCode = roomTarget ? roomTarget.code : roomId;
+
+    const result = await deleteRoomFromApi(roomId);
+    if (!result.success) {
+      setRoomToDelete(null);
+      showToast(`Firebase menolak penghapusan ruangan ${roomCode}; ruangan tetap ditampilkan.`);
+      return;
+    }
+    setRawRooms((prev) => prev.filter((r) => r.id !== roomId));
+
+    if (selectedAnalyticsRoomId === roomId) {
+      setSelectedAnalyticsRoomId("B12-101");
+    }
+
+    setRoomToDelete(null);
+    showWriteOutcome(result, {
+      synced: `Ruangan ${roomCode} dihapus dari Firebase.`,
+      local: `Ruangan ${roomCode} dihapus lokal; Firebase belum tersinkron.`,
+      rejected: `Firebase menolak penghapusan ruangan ${roomCode}.`,
+    });
   };
 
   const toggleFavoriteRoom = (roomId) => {
@@ -427,11 +619,23 @@ export default function App() {
   };
 
   const handleBookRoom = async (room) => {
+    if (!checkPermission(currentUser, "canBookRooms")) {
+      setPermissionPromptMessage(
+        "Akses Terbatas: Pengunjung tamu / publik tidak memiliki hak reservasi ruangan kuliah FT UM. Silakan masuk dengan akun Mahasiswa atau Staf Sarpras FT UM."
+      );
+      setShowLoginModal(true);
+      return;
+    }
     const updatePayload = {
       isOccupied: true,
       occupancyCount: 1,
-      scheduleInfo: "Digunakan oleh Anda (Belajar Mandiri)",
+      scheduleInfo: `Digunakan oleh ${currentUser?.name || "Anda"} (Belajar Mandiri)`,
     };
+    const result = await syncActuatorToApi(room.id, updatePayload);
+    if (!result.success) {
+      showToast(`Firebase menolak reservasi ruangan ${room.code}.`);
+      return;
+    }
     setRawRooms((prev) =>
       prev.map((r) =>
         r.id === room.id
@@ -442,9 +646,12 @@ export default function App() {
           : r
       )
     );
-    await syncActuatorToApi(room.id, updatePayload);
     setBookingModalRoom(null);
-    showToast(`Ruangan ${room.code} berhasil dipesan dan siap digunakan (HTTP Sync)!`);
+    showWriteOutcome(result, {
+      synced: `Ruangan ${room.code} dipesan dan tersinkron ke Firebase.`,
+      local: `Ruangan ${room.code} dipesan lokal; Firebase belum tersinkron.`,
+      rejected: `Firebase menolak reservasi ruangan ${room.code}.`,
+    });
   };
 
   const handleSubmitReport = (e) => {
@@ -454,45 +661,63 @@ export default function App() {
     setReportForm({ category: "AC Kurang Dingin", notes: "" });
   };
 
-  // Demo Scenarios Preset untuk Dosen
-  const handleTriggerPreset = (type) => {
+  // Demo Scenarios Preset untuk Dosen (Real-Time Sync ke Firebase RTDB)
+  const handleTriggerPreset = async (type) => {
     if (type === "co2_hazard") {
+      const co2Payload = { co2: 1150, pm25: 42.5, isOccupied: true, occupancyCount: 48 };
       setRawRooms((prev) =>
         prev.map((r) =>
-          r.id === "R-204"
-            ? { ...r, co2: 1150, pm25: 42.5, isOccupied: true, occupancyCount: 48 }
+          r.id === "B12-204" || r.id === "R-204"
+            ? { ...r, ...co2Payload }
             : r
         )
       );
       setAlertBannerVisible(true);
-      showToast("Preset Dimuat: Kadar CO2 R-204 dinaikkan ke 1.150 ppm (Kritis)!");
+      const results = await Promise.all([
+        syncActuatorToApi("B12-204", co2Payload),
+        syncActuatorToApi("R-204", co2Payload),
+      ]);
+      showWriteOutcome(results, {
+        synced: "Preset CO₂ kritis dimuat dan tersinkron ke Firebase.",
+        local: "Preset CO₂ kritis dimuat di simulator; Firebase belum tersinkron.",
+        rejected: "Preset CO₂ aktif lokal, tetapi sebagian perintah ditolak Firebase.",
+      });
     } else if (type === "freeze_empty") {
+      const freezePayload = { isOccupied: false, occupancyCount: 0, acActive: true, temp: 19.5, emptyDurationMins: 165 };
       setRawRooms((prev) =>
         prev.map((r) =>
-          r.id === "B-302"
-            ? { ...r, isOccupied: false, occupancyCount: 0, acActive: true, temp: 19.5, emptyDurationMins: 165 }
+          r.id === "B12-302" || r.id === "B-302"
+            ? { ...r, ...freezePayload }
             : r
         )
       );
-      showToast("Preset Dimuat: B-302 Kosong dibekukan ke 19.5°C dengan AC Aktif!");
+      const results = await Promise.all([
+        syncActuatorToApi("B12-302", freezePayload),
+        syncActuatorToApi("B-302", freezePayload),
+      ]);
+      showWriteOutcome(results, {
+        synced: "Preset anomali AC dimuat dan tersinkron ke Firebase.",
+        local: "Preset anomali AC dimuat di simulator; Firebase belum tersinkron.",
+        rejected: "Preset anomali AC aktif lokal, tetapi sebagian perintah ditolak Firebase.",
+      });
     } else if (type === "pir_noise") {
       // Simulasikan spike instan
       setRawRooms((prev) =>
         prev.map((r) =>
-          r.id === "A-101"
+          r.id === "B12-101" || r.id === "A-101"
             ? { ...r, occupancyCount: Math.random() > 0.5 ? 2 : 0 }
             : r
         )
       );
       showToast("Preset Dimuat: Noise sensor PIR diinjeksikan untuk diuji oleh EMA!");
     } else if (type === "gps_walk") {
-      // Pindahkan lokasi mahasiswa mendekat ke Gedung B
+      // Pindahkan lokasi mahasiswa mendekat ke Gedung B12 DTEI FT UM
       setUserLocation({
         lat: -7.96135,
-        lon: 112.61775,
-        name: "Di Depan Gedung B (Lantai 2)",
+        lon: 112.61770,
+        name: "Gedung B12 FT UM (DTEI)",
       });
-      showToast("Preset Dimuat: Posisi GPS mahasiswa dipindahkan mendekat ke Gedung B!");
+      showToast("Preset Dimuat: Posisi GPS mahasiswa dipindahkan ke depan Gedung B12 FT!");
     } else if (type === "normal") {
       setRawRooms(RAW_CAMPUS_ROOMS);
       setUserLocation(CURRENT_USER_LOCATION);
@@ -560,10 +785,32 @@ export default function App() {
               )}
             </button>
 
-            {/* Profile Avatar Mahasiswa */}
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold border-2 border-white shadow-xs">
-              UM
-            </div>
+            {/* Profile Avatar & Role Control Button */}
+            <button
+              onClick={() => setShowProfileModal(true)}
+              className="flex items-center gap-1.5 pl-1 pr-2 py-0.5 rounded-full bg-slate-100 hover:bg-slate-200 border border-slate-200/80 active:scale-95 transition"
+              title="Profil Pengguna & Hak Akses"
+            >
+              <div
+                className={`w-7 h-7 rounded-full bg-gradient-to-br ${
+                  currentUser?.avatarBg || "from-emerald-600 to-teal-800"
+                } flex items-center justify-center text-white text-[11px] font-black border border-white shadow-xs`}
+              >
+                {currentUser?.avatarInitials || "UM"}
+              </div>
+              <div className="text-left hidden min-[360px]:block">
+                <span className="text-[10px] font-extrabold text-slate-800 block leading-tight truncate max-w-[70px]">
+                  {currentUser?.name ? currentUser.name.split(" ")[0] : "Tamu"}
+                </span>
+                <span className="text-[8px] font-bold text-teal-800 uppercase tracking-tight block leading-none">
+                  {currentUser?.role === "admin"
+                    ? "Sarpras"
+                    : currentUser?.role === "mahasiswa"
+                    ? "Mahasiswa"
+                    : "Tamu"}
+                </span>
+              </div>
+            </button>
           </div>
         </header>
 
@@ -579,8 +826,8 @@ export default function App() {
             ></span>
             <span className="font-semibold text-slate-200 truncate">
               {apiConnectionStatus.isLive
-                ? "API Connected • Open-Meteo & IoT Telemetry Sync"
-                : "API Standby • Open-Meteo & IoT Telemetry Sync"}
+                ? `${apiConnectionStatus.source} • Online`
+                : `${apiConnectionStatus.source} • Standby`}
             </span>
             <span className="text-slate-400 text-[9px] shrink-0">
               ({apiConnectionStatus.lastSyncTime})
@@ -590,12 +837,12 @@ export default function App() {
             onClick={() => syncAllApis(true)}
             disabled={apiConnectionStatus.isSyncing}
             className="flex items-center gap-1 bg-slate-800 hover:bg-slate-700 active:scale-95 text-teal-300 font-bold px-2 py-0.5 rounded-md transition shrink-0 ml-1.5"
-            title="Sinkronisasi Ulang HTTP REST API"
+            title="Sinkronisasi Ulang Firebase RTDB & Open-Meteo"
           >
             <RefreshCw
               className={`w-2.5 h-2.5 ${apiConnectionStatus.isSyncing ? "animate-spin text-amber-400" : ""}`}
             />
-            <span>{apiConnectionStatus.isSyncing ? "Syncing..." : "Sync API Sekarang"}</span>
+            <span>{apiConnectionStatus.isSyncing ? "Syncing..." : "Sync RTDB"}</span>
           </button>
         </div>
 
@@ -624,6 +871,52 @@ export default function App() {
         {/* ==================================================================== */}
         {activeTab === "beranda" && (
           <main className="flex-1 p-4 space-y-4 animate-in fade-in duration-150">
+            {/* Kartu Status Otorisasi Pengguna Aktif (RBAC FT UM) */}
+            <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-teal-950 text-white p-3 rounded-2xl flex items-center justify-between shadow-xs border border-slate-700/50">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div
+                  className={`w-8 h-8 rounded-xl bg-gradient-to-br ${
+                    currentUser?.avatarBg || "from-emerald-600 to-teal-800"
+                  } flex items-center justify-center text-white text-xs font-black shadow-xs shrink-0`}
+                >
+                  {currentUser?.avatarInitials || "UM"}
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-xs font-black text-white leading-tight truncate">
+                      {currentUser?.name || "Tamu Pengunjung"}
+                    </span>
+                    <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/40 uppercase">
+                      {currentUser?.roleBadge || "Tamu"}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-slate-300 block truncate mt-0.5">
+                    {currentUser?.role === "admin"
+                      ? "Otorisasi Penuh: Kendali AC, Lampu, Audit & Tambah Ruang"
+                      : currentUser?.role === "mahasiswa"
+                      ? "Akses Mahasiswa: Monitoring, Rekomendasi & Reservasi"
+                      : "Akses Tamu Publik: Read-only Pemantauan Lingkungan"}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                <button
+                  onClick={handleOpenAddRoomModal}
+                  className="text-[10px] font-extrabold px-2.5 py-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white transition shadow-xs flex items-center gap-1"
+                  title="Tambah Ruang Baru ke Firebase RTDB"
+                >
+                  <PlusCircle className="w-3 h-3" />
+                  <span>+ Ruang</span>
+                </button>
+                <button
+                  onClick={() => setShowProfileModal(true)}
+                  className="text-[10px] font-extrabold px-2.5 py-1 rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-teal-300 transition border border-white/10"
+                >
+                  Akun
+                </button>
+              </div>
+            </div>
+
             {/* 1. Kotak Pencarian Fuzzy (Algoritma 5: Levenshtein Distance) */}
             <div className="relative">
               <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -1003,6 +1296,30 @@ export default function App() {
         {/* ==================================================================== */}
         {activeTab === "ruangan" && (
           <main className="flex-1 p-4 space-y-3.5 animate-in fade-in duration-150">
+            {/* Action Bar: Tambah Ruangan Baru UM & Sync RTDB */}
+            <div className="flex items-center justify-between gap-2">
+              <button
+                onClick={handleOpenAddRoomModal}
+                className="flex-1 py-2 px-3 bg-gradient-to-r from-teal-800 to-emerald-700 hover:from-teal-900 hover:to-emerald-800 active:scale-95 text-white text-xs font-black rounded-xl shadow-md shadow-teal-900/15 flex items-center justify-center gap-1.5 transition"
+              >
+                <PlusCircle className="w-4 h-4 text-emerald-300" />
+                <span>+ Tambah Ruang Kuliah / Lab UM</span>
+              </button>
+              <button
+                onClick={() => syncAllApis(true)}
+                disabled={apiConnectionStatus.isSyncing}
+                className="py-2 px-3 bg-white hover:bg-slate-100 active:scale-95 text-teal-800 border border-slate-200/90 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shrink-0 shadow-xs"
+                title="Sinkronisasi Data Firebase RTDB"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 text-teal-700 ${
+                    apiConnectionStatus.isSyncing ? "animate-spin text-amber-500" : ""
+                  }`}
+                />
+                <span className="hidden min-[360px]:inline">Sync RTDB</span>
+              </button>
+            </div>
+
             {/* Header Kontrol: Dropdown Gedung & Toggle Daftar/Denah */}
             <div className="flex items-center justify-between gap-2">
               <div className="relative flex-1">
@@ -1011,11 +1328,14 @@ export default function App() {
                   onChange={(e) => setSelectedBuilding(e.target.value)}
                   className="w-full bg-white border border-slate-200/80 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 appearance-none shadow-xs focus:outline-none focus:ring-2 focus:ring-teal-700/30"
                 >
-                  <option value="Semua Gedung">Semua Gedung (A, B, C, D)</option>
-                  <option value="Gedung A">Gedung A (Kuliah Utama)</option>
-                  <option value="Gedung B">Gedung B (Teknik &amp; Sains)</option>
-                  <option value="Gedung C">Gedung C (Workshop &amp; Lab)</option>
-                  <option value="Gedung D">Gedung D (Dekanat &amp; MIPA)</option>
+                  <option value="Semua Gedung">Semua Gedung Kampus UM</option>
+                  <option value="Gedung B12">Gedung B12 FT (DTEI)</option>
+                  <option value="Gedung B11">Gedung B11 FT (Dekanat)</option>
+                  <option value="GKB A19">GKB A19 UM</option>
+                  <option value="GKB A20">GKB A20 UM</option>
+                  <option value="Gedung B3">Gedung B3 FT (Workshop)</option>
+                  <option value="Perpustakaan">Perpustakaan Pusat UM</option>
+                  <option value="Gedung A1">Gedung A1 Rektorat UM</option>
                 </select>
                 <Building2 className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               </div>
@@ -1116,20 +1436,35 @@ export default function App() {
                             {room.building}
                           </p>
                         </div>
-                        <span
-                          className={`text-[9px] font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider shrink-0 flex items-center gap-1 ${
-                            isOccupied
-                              ? "bg-red-100 text-red-700 border border-red-200"
-                              : "bg-emerald-100 text-emerald-800 border border-emerald-200"
-                          }`}
-                        >
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {currentUser?.canManageRooms && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setRoomToDelete(room);
+                              }}
+                              title={`Hapus ${room.code} dari Firebase`}
+                              className="p-1 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           <span
-                            className={`w-1.5 h-1.5 rounded-full ${
-                              isOccupied ? "bg-red-500" : "bg-emerald-500 animate-pulse"
+                            className={`text-[9px] font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider shrink-0 flex items-center gap-1 ${
+                              isOccupied
+                                ? "bg-red-100 text-red-700 border border-red-200"
+                                : "bg-emerald-100 text-emerald-800 border border-emerald-200"
                             }`}
-                          ></span>
-                          {isOccupied ? "TERISI / AKTIF" : "KOSONG / TERSEDIA"}
-                        </span>
+                          >
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                isOccupied ? "bg-red-500" : "bg-emerald-500 animate-pulse"
+                              }`}
+                            ></span>
+                            {isOccupied ? "TERISI / AKTIF" : "KOSONG / TERSEDIA"}
+                          </span>
+                        </div>
                       </div>
 
                       {/* Schedule / Course Context Banner Sesuai Halaman 1 PDF */}
@@ -1695,6 +2030,24 @@ export default function App() {
                 <AlertTriangle className="w-4 h-4" />
                 <span>Laporkan Masalah AC / Sensor</span>
               </button>
+
+              {/* Tombol Hapus Ruangan (Firebase RTDB Delete) */}
+              <button
+                onClick={() => {
+                  if (!checkPermission(currentUser, "canManageRooms")) {
+                    setPermissionPromptMessage(
+                      "Akses Terbatas: Hanya Staf Sarpras (Admin) yang dapat menghapus data ruangan dari Firebase RTDB."
+                    );
+                    setShowLoginModal(true);
+                    return;
+                  }
+                  setRoomToDelete(currentAnalyticsRoom);
+                }}
+                className="w-full py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 bg-slate-100 hover:bg-red-50 text-slate-600 hover:text-red-700 border border-slate-200 transition"
+              >
+                <Trash2 className="w-4 h-4 text-slate-400" />
+                <span>Hapus Ruangan Ini dari Firebase RTDB</span>
+              </button>
             </div>
           </main>
         )}
@@ -1755,18 +2108,29 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Master Button Sesuai Halaman 4 PDF */}
+              {/* Master Button Sesuai Halaman 4 PDF (Dilindungi RBAC) */}
               <button
                 onClick={handleTurnOffAllAC}
                 disabled={anomalyRooms.length === 0}
                 className={`w-full py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-sm transition ${
                   anomalyRooms.length === 0
                     ? "bg-slate-200 text-slate-500 cursor-not-allowed"
+                    : !checkPermission(currentUser, "canControlActuators")
+                    ? "bg-amber-600 hover:bg-amber-700 text-white shadow-amber-800/20 active:scale-95"
                     : "bg-teal-800 hover:bg-teal-900 text-white shadow-teal-900/20 active:scale-95"
                 }`}
               >
-                <Power className="w-4 h-4" />
-                <span>Matikan AC Ruangan Kosong Sekaligus</span>
+                {!checkPermission(currentUser, "canControlActuators") ? (
+                  <>
+                    <Lock className="w-4 h-4 text-amber-200" />
+                    <span>Matikan AC (Otorisasi Sarpras Diperlukan)</span>
+                  </>
+                ) : (
+                  <>
+                    <Power className="w-4 h-4" />
+                    <span>Matikan AC Ruangan Kosong Sekaligus</span>
+                  </>
+                )}
               </button>
             </div>
 
@@ -1915,22 +2279,38 @@ export default function App() {
                         </p>
                       </div>
 
-                      {/* Action Button */}
+                      {/* Action Button (Dilindungi RBAC) */}
                       {isACWaste ? (
                         <button
                           onClick={() => handleTurnOffSingleAC(room.id)}
                           className="w-full bg-red-700 hover:bg-red-800 active:scale-95 text-white text-xs font-bold py-2 px-3 rounded-xl flex items-center justify-center gap-1.5 shadow-sm transition"
                         >
-                          <Power className="w-3.5 h-3.5" />
-                          <span>Matikan AC Jarak Jauh</span>
+                          {!checkPermission(currentUser, "canControlActuators") ? (
+                            <Lock className="w-3.5 h-3.5 text-red-200" />
+                          ) : (
+                            <Power className="w-3.5 h-3.5" />
+                          )}
+                          <span>
+                            {!checkPermission(currentUser, "canControlActuators")
+                              ? "Matikan AC (Perlu Hak Sarpras)"
+                              : "Matikan AC Jarak Jauh"}
+                          </span>
                         </button>
                       ) : (
                         <button
                           onClick={handleTurnOffCorridorLamps}
                           className="w-full bg-teal-800 hover:bg-teal-900 active:scale-95 text-white text-xs font-bold py-2 px-3 rounded-xl flex items-center justify-center gap-1.5 shadow-sm transition"
                         >
-                          <Power className="w-3.5 h-3.5" />
-                          <span>Padamkan Lampu Koridor</span>
+                          {!checkPermission(currentUser, "canControlActuators") ? (
+                            <Lock className="w-3.5 h-3.5 text-teal-200" />
+                          ) : (
+                            <Power className="w-3.5 h-3.5" />
+                          )}
+                          <span>
+                            {!checkPermission(currentUser, "canControlActuators")
+                              ? "Padamkan Lampu (Perlu Hak Sarpras)"
+                              : "Padamkan Lampu Koridor"}
+                          </span>
                         </button>
                       )}
                     </div>
@@ -1956,6 +2336,28 @@ export default function App() {
                 Demo lokal
               </span>
             </div>
+          </main>
+        )}
+
+        {/* ==================================================================== */}
+        {/* TAB 5 / SCREEN: HALAMAN LOGIN (DEDICATED FULL SCREEN)                */}
+        {/* ==================================================================== */}
+        {activeTab === "login" && (
+          <main className="flex-1 p-2 animate-in fade-in duration-150">
+            <LoginPage
+              currentUser={currentUser}
+              permissionPromptMessage={permissionPromptMessage}
+              onLoginSuccess={(user) => {
+                setCurrentUser(user);
+                setActiveTab("beranda");
+                setPermissionPromptMessage(null);
+                showToast(`Berhasil masuk sebagai ${user.name} (${user.roleBadge})`);
+              }}
+              onCancel={() => {
+                setActiveTab("beranda");
+                setPermissionPromptMessage(null);
+              }}
+            />
           </main>
         )}
 
@@ -1993,11 +2395,19 @@ export default function App() {
         {/* ==================================================================== */}
         <div className="fixed bottom-20 right-4 z-40">
           <button
-            onClick={() => setIsSimulatorOpen(true)}
+            onClick={handleOpenSimulator}
             className="flex items-center gap-1.5 bg-gradient-to-r from-slate-900 to-teal-950 text-white px-3 py-2 rounded-full shadow-xl border border-teal-500/40 text-xs font-bold hover:scale-105 active:scale-95 transition"
+            title={
+              checkPermission(currentUser, "canAccessSimulator")
+                ? "Buka Panel Simulator IoT"
+                : "Simulator IoT Terkunci (Perlu Hak Staf Sarpras)"
+            }
           >
             <Sliders className="w-3.5 h-3.5 text-teal-400 animate-spin" style={{ animationDuration: "6s" }} />
             <span>IoT Demo Control</span>
+            {!checkPermission(currentUser, "canAccessSimulator") && (
+              <Lock className="w-3 h-3 text-amber-400 shrink-0 ml-0.5" />
+            )}
           </button>
         </div>
 
@@ -2583,6 +2993,294 @@ export default function App() {
                   </button>
                 </div>
               </form>
+            </div>
+          </div>
+        )}
+
+        {/* ==================================================================== */}
+        {/* MODAL: PROFIL PENGGUNA & HAK OTORISASI (RBAC FT UM)                  */}
+        {/* ==================================================================== */}
+        {showProfileModal && (
+          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-150">
+            <div className="bg-white w-full max-w-[400px] max-h-[90vh] rounded-3xl p-5 space-y-4 shadow-2xl overflow-y-auto animate-in zoom-in-95 duration-200">
+              <div className="flex items-center justify-between border-b pb-3">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-5 h-5 text-teal-700" />
+                  <div>
+                    <h3 className="text-sm font-extrabold text-slate-900 leading-tight">
+                      Profil &amp; Hak Akses
+                    </h3>
+                    <p className="text-[10px] text-slate-500">
+                      Role-Based Access Control (RBAC) ClassSense
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowProfileModal(false)}
+                  className="text-slate-400 hover:text-slate-700 p-1"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* User Bio Card */}
+              <div className="p-3.5 rounded-2xl bg-gradient-to-br from-slate-50 to-slate-100 border border-slate-200/80 flex items-start gap-3">
+                <div
+                  className={`w-12 h-12 rounded-2xl bg-gradient-to-br ${
+                    currentUser?.avatarBg || "from-emerald-600 to-teal-800"
+                  } flex items-center justify-center text-white text-base font-black shadow-md shrink-0`}
+                >
+                  {currentUser?.avatarInitials || "UM"}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-xs font-black text-slate-900 truncate">
+                      {currentUser?.name || "Tamu Pengunjung"}
+                    </h4>
+                  </div>
+                  <span className="inline-block mt-0.5 text-[9px] font-extrabold px-2 py-0.5 rounded-full bg-teal-100 text-teal-800 border border-teal-200">
+                    {currentUser?.roleBadge || "Tamu / Publik"}
+                  </span>
+                  <div className="mt-1.5 space-y-0.5 text-[10px] text-slate-600">
+                    {currentUser?.email && (
+                      <p className="truncate">Email: <b>{currentUser.email}</b></p>
+                    )}
+                    {currentUser?.nip && (
+                      <p>NIP: <b>{currentUser.nip}</b></p>
+                    )}
+                    {currentUser?.nim && (
+                      <p>NIM: <b>{currentUser.nim}</b></p>
+                    )}
+                    {currentUser?.department && (
+                      <p className="truncate text-slate-500">{currentUser.department}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Matriks Izin Fitur (Permissions Matrix) */}
+              <div className="space-y-2">
+                <h5 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-teal-700" />
+                  <span>Matriks Izin Fitur Aplikasi:</span>
+                </h5>
+
+                <div className="bg-slate-50 rounded-2xl p-2.5 border border-slate-200/70 space-y-1.5 text-[11px]">
+                  {[
+                    {
+                      key: "canControlActuators",
+                      label: "Kendali Aktuator Jarak Jauh (AC & Lampu)",
+                      desc: "Mematikan AC/lampu saat anomali pemborosan energi",
+                    },
+                    {
+                      key: "canAccessAuditManagement",
+                      label: "Master Shutdown Audit Fasilitas",
+                      desc: "Mematikan seluruh AC ruang kosong sekaligus",
+                    },
+                    {
+                      key: "canAccessSimulator",
+                      label: "Simulator Telemetri IoT ESP32",
+                      desc: "Manipulasi nilai sensor mentah untuk demo dosen",
+                    },
+                    {
+                      key: "canBookRooms",
+                      label: "Reservasi Ruang Kuliah / Belajar",
+                      desc: "Booking ruangan kosong untuk belajar mandiri",
+                    },
+                    {
+                      key: "canReportIssues",
+                      label: "Pelaporan Kendala Fasilitas",
+                      desc: "Mengirim tiket masalah fasilitas ke sarpras",
+                    },
+                  ].map((perm) => {
+                    const hasAccess = checkPermission(currentUser, perm.key);
+                    return (
+                      <div
+                        key={perm.key}
+                        className={`p-2 rounded-xl border flex items-start gap-2 ${
+                          hasAccess
+                            ? "bg-emerald-50/60 border-emerald-200/80 text-emerald-950"
+                            : "bg-slate-100/60 border-slate-200 text-slate-500"
+                        }`}
+                      >
+                        {hasAccess ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                        ) : (
+                          <Lock className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                        )}
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-[11px] leading-tight">
+                              {perm.label}
+                            </span>
+                            <span
+                              className={`text-[9px] font-extrabold px-1.5 py-0.2 rounded-md ${
+                                hasAccess
+                                  ? "bg-emerald-600 text-white"
+                                  : "bg-slate-200 text-slate-600"
+                              }`}
+                            >
+                              {hasAccess ? "Diizinkan" : "Terkunci"}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 mt-0.5 leading-snug">
+                            {perm.desc}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Quick Switch Preset Akun Demo */}
+              <div className="space-y-2 pt-1 border-t">
+                <h5 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-500">
+                  Akses Cepat Demo Dosen:
+                </h5>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => {
+                      setCurrentUser(REGISTERED_USERS[0]);
+                      setShowProfileModal(false);
+                      showToast("Beralih ke Akun Staf Sarpras (Admin Penuh)");
+                    }}
+                    className={`p-2 rounded-xl text-left border text-xs font-bold transition flex items-center gap-2 ${
+                      currentUser?.role === "admin"
+                        ? "bg-emerald-100 border-emerald-400 text-emerald-900 ring-2 ring-emerald-500/20"
+                        : "bg-slate-50 hover:bg-emerald-50 border-slate-200 text-slate-700"
+                    }`}
+                  >
+                    <div className="w-6 h-6 rounded-lg bg-emerald-600 text-white flex items-center justify-center text-[10px] font-black shrink-0">
+                      BS
+                    </div>
+                    <div className="truncate">
+                      <span className="block text-[11px] font-black truncate">Staf Sarpras</span>
+                      <span className="block text-[9px] text-emerald-800 font-semibold">Admin Penuh</span>
+                    </div>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setCurrentUser(REGISTERED_USERS[1]);
+                      setShowProfileModal(false);
+                      showToast("Beralih ke Akun Mahasiswa FT (Akses Reguler)");
+                    }}
+                    className={`p-2 rounded-xl text-left border text-xs font-bold transition flex items-center gap-2 ${
+                      currentUser?.role === "mahasiswa"
+                        ? "bg-sky-100 border-sky-400 text-sky-900 ring-2 ring-sky-500/20"
+                        : "bg-slate-50 hover:bg-sky-50 border-slate-200 text-slate-700"
+                    }`}
+                  >
+                    <div className="w-6 h-6 rounded-lg bg-sky-600 text-white flex items-center justify-center text-[10px] font-black shrink-0">
+                      RA
+                    </div>
+                    <div className="truncate">
+                      <span className="block text-[11px] font-black truncate">Mahasiswa FT</span>
+                      <span className="block text-[9px] text-sky-800 font-semibold">Akses Terbatas</span>
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex gap-2 pt-2 border-t">
+                <button
+                  onClick={() => {
+                    setShowProfileModal(false);
+                    setShowLoginModal(true);
+                  }}
+                  className="flex-1 py-2.5 bg-teal-800 hover:bg-teal-900 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center justify-center gap-1.5"
+                >
+                  <LogIn className="w-3.5 h-3.5" />
+                  <span>Buka Halaman Login</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setCurrentUser(GUEST_USER);
+                    setShowProfileModal(false);
+                    showToast("Anda telah keluar (Mode Tamu / Publik)");
+                  }}
+                  className="py-2.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1"
+                >
+                  <LogOut className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Logout</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ==================================================================== */}
+        {/* MODAL / VIEW: HALAMAN LOGIN LENGKAP & RBAC                           */}
+        {/* ==================================================================== */}
+        {showLoginModal && (
+          <div className="fixed inset-0 bg-slate-900/70 z-50 flex items-center justify-center p-3 backdrop-blur-xs animate-in fade-in duration-200">
+            <div className="bg-slate-50 w-full max-w-[430px] max-h-[92vh] rounded-3xl overflow-y-auto shadow-2xl flex flex-col border border-slate-200">
+              <LoginPage
+                currentUser={currentUser}
+                permissionPromptMessage={permissionPromptMessage}
+                onLoginSuccess={(user) => {
+                  setCurrentUser(user);
+                  setShowLoginModal(false);
+                  setPermissionPromptMessage(null);
+                  showToast(`Berhasil masuk sebagai ${user.name} (${user.roleBadge})`);
+                }}
+                onCancel={() => {
+                  setShowLoginModal(false);
+                  setPermissionPromptMessage(null);
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* ==================================================================== */}
+        {/* MODAL: TAMBAH RUANGAN BARU & SINKRONISASI KE FIREBASE RTDB          */}
+        {/* ==================================================================== */}
+        <AddRoomModal
+          isOpen={showAddRoomModal}
+          onClose={() => setShowAddRoomModal(false)}
+          onAddRoom={handleAddRoomSubmit}
+          existingRoomCodes={rawRooms.map((r) => r.code || r.id)}
+        />
+
+        {/* ==================================================================== */}
+        {/* MODAL: KONFIRMASI HAPUS RUANGAN DARI FIREBASE RTDB                  */}
+        {/* ==================================================================== */}
+        {roomToDelete && (
+          <div className="fixed inset-0 bg-slate-900/70 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
+            <div className="bg-white w-full max-w-[380px] rounded-3xl p-5 shadow-2xl border border-red-100 flex flex-col animate-in zoom-in-95 duration-200">
+              <div className="w-12 h-12 rounded-2xl bg-red-50 text-red-600 flex items-center justify-center mb-3">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <h3 className="text-base font-extrabold text-slate-800 mb-1">
+                Hapus Ruangan dari Database?
+              </h3>
+              <p className="text-xs text-slate-500 leading-relaxed mb-4">
+                Apakah Anda yakin ingin menghapus{" "}
+                <span className="font-bold text-slate-700">
+                  {roomToDelete.code || roomToDelete.id} - {roomToDelete.name}
+                </span>{" "}
+                dari Firebase Realtime Database? Tindakan ini akan menghapus data telemetri ruangan secara permanen dari cloud.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setRoomToDelete(null)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-100 transition"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteRoom(roomToDelete.id)}
+                  className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-xs font-bold text-white transition shadow-sm flex items-center justify-center gap-1.5"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Ya, Hapus</span>
+                </button>
+              </div>
             </div>
           </div>
         )}
