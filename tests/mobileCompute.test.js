@@ -378,23 +378,27 @@ async function runTestSuite() {
     "canControlActuators: false (Aman), canBookRooms: true"
   );
 
-  // Verifikasi Tamu / Publik: Default role non-admin, tidak bisa booking
+  // Verifikasi Penguncian Total Sebelum Login (Mandatory Login Gate): Unauthenticated (null)
+  const unauthenticatedUser = null;
   assertTest(
-    GUEST_USER.role === "guest" &&
-    checkPermission(GUEST_USER, "canBookRooms") === false &&
-    checkPermission(GUEST_USER, "canControlActuators") === false &&
-    checkPermission(GUEST_USER, "canManageRooms") === false,
-    "Auth & RBAC 6: Default Role Awal adalah Non-Admin / Read-Only Guest",
-    "canBookRooms: false, canControlActuators: false, canManageRooms: false"
+    unauthenticatedUser === null &&
+    verifySessionIntegrity(unauthenticatedUser) === false &&
+    verifySessionIntegrity(GUEST_USER) === false &&
+    checkPermission(unauthenticatedUser, "canBookRooms") === false &&
+    checkPermission(unauthenticatedUser, "canControlActuators") === false &&
+    checkPermission(unauthenticatedUser, "canManageRooms") === false &&
+    checkPermission(unauthenticatedUser, "canAccessSimulator") === false,
+    "Auth & RBAC 6: State Awal Belum Login adalah Unauthenticated (null) & Terkunci Total",
+    "currentUser: null, verifySessionIntegrity: false, All Permissions: false"
   );
 
   // Verifikasi Hak Tambah / Hapus Ruangan (canManageRooms)
   assertTest(
     checkPermission(sarprasUser, "canManageRooms") === true &&
     checkPermission(mhsUser, "canManageRooms") === false &&
-    checkPermission(GUEST_USER, "canManageRooms") === false,
+    checkPermission(unauthenticatedUser, "canManageRooms") === false,
     "Auth & RBAC 7: Hak Pengelolaan Ruangan (canManageRooms)",
-    "Sarpras: true, Mahasiswa: false, Guest: false"
+    "Sarpras: true, Mahasiswa: false, Unauthenticated: false"
   );
 
   // --------------------------------------------------------------------------

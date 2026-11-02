@@ -254,8 +254,8 @@ function BufferLikeBase64(str) {
 export function verifySessionIntegrity(sessionUser) {
   if (!sessionUser || typeof sessionUser !== "object") return false;
   if (!sessionUser.id || !sessionUser.role || !sessionUser.expiresAt || !sessionUser.signatureHash) {
-    // Sesi Tamu tanpa token dianggap valid sebagai role guest biasa
-    return sessionUser.role === "guest";
+    // Sesi tanpa token/signature kriptografis ditolak total (wajib login, tanpa bypass tamu)
+    return false;
   }
 
   // 1. Cek masa berlaku sesi (expiring session token)

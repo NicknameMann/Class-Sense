@@ -2,7 +2,6 @@ import React, { useState } from "react";
 import {
   Building2,
   Lock,
-  Unlock,
   KeyRound,
   User,
   ShieldCheck,
@@ -13,12 +12,15 @@ import {
   CheckCircle2,
   Sparkles,
   Info,
+  LogIn,
+  Zap,
+  UserCheck,
+  Shield,
 } from "lucide-react";
 import {
   authenticateUser,
   createSignedSession,
   REGISTERED_USERS,
-  GUEST_USER,
 } from "../services/authService";
 
 export default function LoginPage({
@@ -26,6 +28,7 @@ export default function LoginPage({
   onCancel,
   permissionPromptMessage = null,
   currentUser = null,
+  isGateMode = false,
 }) {
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
@@ -57,7 +60,18 @@ export default function LoginPage({
     }
   };
 
-  const handleQuickLogin = (userType) => {
+  const handleFillDemo = (userType) => {
+    setErrorMessage("");
+    if (userType === "sarpras") {
+      setIdentifier("sarpras@um.ac.id");
+      setPassword("admin123");
+    } else if (userType === "mahasiswa") {
+      setIdentifier("mahasiswa@um.ac.id");
+      setPassword("mhs123");
+    }
+  };
+
+  const handleInstantDemoLogin = (userType) => {
     setIsLoading(true);
     setErrorMessage("");
     setTimeout(() => {
@@ -66,22 +80,20 @@ export default function LoginPage({
         onLoginSuccess(createSignedSession(REGISTERED_USERS[0], 2));
       } else if (userType === "mahasiswa") {
         onLoginSuccess(createSignedSession(REGISTERED_USERS[1], 2));
-      } else if (userType === "guest") {
-        onLoginSuccess(GUEST_USER);
       }
-    }, 250);
+    }, 200);
   };
 
   return (
     <div className="flex-1 p-4 pb-12 flex flex-col justify-center animate-in fade-in duration-200">
-      {/* Back button jika login dibuka dari tab lain */}
-      {onCancel && (
+      {/* Back button jika login dibuka dari modal profil (bukan full-screen gate) */}
+      {!isGateMode && onCancel && (
         <button
           onClick={onCancel}
           className="self-start text-xs font-bold text-teal-800 hover:text-teal-950 flex items-center gap-1.5 mb-3 px-2 py-1 rounded-lg hover:bg-slate-100 transition"
         >
           <ArrowLeft className="w-4 h-4" />
-          <span>Kembali ke Beranda</span>
+          <span>Kembali</span>
         </button>
       )}
 
@@ -100,7 +112,7 @@ export default function LoginPage({
         </div>
       )}
 
-      {/* Sesi Pengguna Aktif Saat Ini */}
+      {/* Sesi Pengguna Aktif Saat Ini jika sedang ganti akun */}
       {currentUser && (
         <div className="mb-4 p-3 rounded-2xl bg-slate-100/90 border border-slate-200 flex items-center justify-between text-xs shadow-xs">
           <div className="flex items-center gap-2.5">
@@ -149,25 +161,25 @@ export default function LoginPage({
         <div className="bg-slate-50 border border-slate-200/70 p-3 rounded-2xl text-[11px] text-slate-600 space-y-1.5">
           <div className="flex items-center gap-1.5 font-bold text-slate-800">
             <ShieldCheck className="w-4 h-4 text-teal-700" />
-            <span>Tingkatan Hak Akses Pengguna:</span>
+            <span>Hak Akses Terotentikasi:</span>
           </div>
-          <ul className="space-y-1 text-[10px] pl-1 text-slate-600">
+          <ul className="space-y-1.5 text-[10px] pl-1 text-slate-600">
             <li className="flex items-start gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-1 shrink-0"></span>
               <span>
-                <b>Staf Sarpras (Admin):</b> Berhak mengendalikan AC &amp; lampu jarak jauh, master shutdown energi, dan simulator telemetri IoT.
+                <b>Staf Sarpras (Admin):</b> Berhak kendali AC &amp; lampu jarak jauh, master audit energi, tambah/hapus ruangan, dan akses IoT Simulator.
               </span>
             </li>
             <li className="flex items-start gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-sky-500 mt-1 shrink-0"></span>
               <span>
-                <b>Mahasiswa:</b> Pemantauan suhu &amp; kualitas udara real-time, pencarian ruang kuliah, dan reservasi belajar mandiri.
+                <b>Mahasiswa FT UM:</b> Pemantauan suhu &amp; ISPU/AQI real-time, pencarian SAW ruang terbaik, dan reservasi belajar mandiri.
               </span>
             </li>
           </ul>
         </div>
 
-        {/* Form Login */}
+        {/* Form Login Kredensial */}
         <form onSubmit={handleSubmit} className="space-y-3 pt-1">
           {errorMessage && (
             <div className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-medium flex items-center gap-2">
@@ -221,78 +233,105 @@ export default function LoginPage({
             className="w-full py-2.5 bg-teal-800 hover:bg-teal-900 active:scale-95 text-white text-xs font-extrabold rounded-xl transition shadow-md shadow-teal-900/20 flex items-center justify-center gap-2"
           >
             <Lock className="w-3.5 h-3.5" />
-            <span>{isLoading ? "Memverifikasi..." : "Masuk ke Sistem"}</span>
+            <span>{isLoading ? "Memverifikasi Kredensial..." : "Masuk ke Sistem"}</span>
           </button>
         </form>
 
-        {/* Divider */}
+        {/* Divider Presets Demo */}
         <div className="relative py-1">
           <div className="absolute inset-0 flex items-center">
             <div className="w-full border-t border-slate-200"></div>
           </div>
           <div className="relative flex justify-center text-[10px] uppercase font-extrabold">
-            <span className="bg-white px-2 text-slate-400">
-              Atau Pilih Akses Cepat Demo Dosen
+            <span className="bg-white px-2 text-slate-400 flex items-center gap-1">
+              <Sparkles className="w-3 h-3 text-amber-500" />
+              Akun Uji Cepat Demo Dosen
             </span>
           </div>
         </div>
 
-        {/* Quick Demo Login Presets */}
-        <div className="space-y-2">
-          <button
-            type="button"
-            onClick={() => handleQuickLogin("sarpras")}
-            className="w-full p-2.5 bg-gradient-to-r from-emerald-50 to-teal-50 hover:from-emerald-100 hover:to-teal-100 border border-emerald-300 rounded-2xl flex items-center justify-between text-left transition active:scale-98 shadow-xs"
-          >
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center text-xs font-black shadow-xs">
+        {/* Preset 1: Staf Sarpras (Admin) */}
+        <div className="p-3 bg-gradient-to-r from-emerald-50/90 to-teal-50/90 border border-emerald-300/80 rounded-2xl space-y-2 shadow-xs">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center text-xs font-black shadow-xs">
                 SP
               </div>
               <div>
                 <span className="text-xs font-black text-slate-900 block leading-tight">
-                  Staf Sarpras FT (Hak Penuh Admin)
+                  Staf Sarpras FT UM (Admin)
                 </span>
-                <span className="text-[10px] text-emerald-800 font-semibold block">
-                  Bisa Kendalikan AC &amp; Lampu, Audit, Tambah Ruangan
+                <span className="text-[9px] text-emerald-800 font-bold block">
+                  sarpras@um.ac.id • sandi: admin123
                 </span>
               </div>
             </div>
-            <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-emerald-600 text-white shrink-0">
-              Pilih &gt;
+            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200">
+              Hak Penuh
             </span>
-          </button>
+          </div>
+          <div className="grid grid-cols-2 gap-2 pt-0.5">
+            <button
+              type="button"
+              onClick={() => handleFillDemo("sarpras")}
+              className="py-1.5 px-2 bg-white hover:bg-emerald-100/60 border border-emerald-200 text-emerald-800 text-[10px] font-bold rounded-xl transition text-center active:scale-95"
+            >
+              Isi Form
+            </button>
+            <button
+              type="button"
+              onClick={() => handleInstantDemoLogin("sarpras")}
+              className="py-1.5 px-2 bg-emerald-700 hover:bg-emerald-800 text-white text-[10px] font-extrabold rounded-xl transition text-center shadow-xs active:scale-95 flex items-center justify-center gap-1"
+            >
+              <Zap className="w-3 h-3 text-amber-300" />
+              <span>Masuk Cepat</span>
+            </button>
+          </div>
+        </div>
 
-          <button
-            type="button"
-            onClick={() => handleQuickLogin("mahasiswa")}
-            className="w-full p-2.5 bg-gradient-to-r from-sky-50 to-indigo-50 hover:from-sky-100 hover:to-indigo-100 border border-sky-300 rounded-2xl flex items-center justify-between text-left transition active:scale-98 shadow-xs"
-          >
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-xl bg-sky-600 text-white flex items-center justify-center text-xs font-black shadow-xs">
+        {/* Preset 2: Mahasiswa FT UM (Reguler) */}
+        <div className="p-3 bg-gradient-to-r from-sky-50/90 to-indigo-50/90 border border-sky-300/80 rounded-2xl space-y-2 shadow-xs">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-sky-600 text-white flex items-center justify-center text-xs font-black shadow-xs">
                 FT
               </div>
               <div>
                 <span className="text-xs font-black text-slate-900 block leading-tight">
-                  Mahasiswa FT (Akses Reguler)
+                  Mahasiswa FT UM (Reguler)
                 </span>
-                <span className="text-[10px] text-sky-800 font-semibold block">
-                  Monitoring Ruang, Booking, Lapor Kendala
+                <span className="text-[9px] text-sky-800 font-bold block">
+                  mahasiswa@um.ac.id • sandi: mhs123
                 </span>
               </div>
             </div>
-            <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-sky-600 text-white shrink-0">
-              Pilih &gt;
+            <span className="text-[9px] font-black px-1.5 py-0.5 rounded-md bg-sky-100 text-sky-800 border border-sky-200">
+              Monitoring
             </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleQuickLogin("guest")}
-            className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition text-center"
-          >
-            Lanjut sebagai Tamu / Publik
-          </button>
+          </div>
+          <div className="grid grid-cols-2 gap-2 pt-0.5">
+            <button
+              type="button"
+              onClick={() => handleFillDemo("mahasiswa")}
+              className="py-1.5 px-2 bg-white hover:bg-sky-100/60 border border-sky-200 text-sky-800 text-[10px] font-bold rounded-xl transition text-center active:scale-95"
+            >
+              Isi Form
+            </button>
+            <button
+              type="button"
+              onClick={() => handleInstantDemoLogin("mahasiswa")}
+              className="py-1.5 px-2 bg-sky-700 hover:bg-sky-800 text-white text-[10px] font-extrabold rounded-xl transition text-center shadow-xs active:scale-95 flex items-center justify-center gap-1"
+            >
+              <Zap className="w-3 h-3 text-amber-300" />
+              <span>Masuk Cepat</span>
+            </button>
+          </div>
         </div>
+
+        {/* Footer Security Note */}
+        <p className="text-[10px] text-slate-400 text-center leading-relaxed">
+          Autentikasi diamankan dengan verifikasi satu arah SHA-256 kriptografis + salt, serta signature integritas sesi anti-tampering.
+        </p>
       </div>
     </div>
   );

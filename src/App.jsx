@@ -57,7 +57,6 @@ import LoginPage from "./components/LoginPage";
 import AddRoomModal from "./components/AddRoomModal";
 import {
   REGISTERED_USERS,
-  GUEST_USER,
   authenticateUser,
   checkPermission,
   createSignedSession,
@@ -178,7 +177,7 @@ export default function App() {
   });
 
   // Role-Based Access Control (RBAC) & Sesi Pengguna Berintegritas Kriptografis
-  // Default awal instalasi / buka pertama kali: Tamu / Pengunjung (Read-Only Least Privilege)
+  // Mandatory Login Gate: Default awal saat aplikasi dibuka adalah null (Belum Login / Terkunci)
   const [currentUser, setCurrentUser] = useState(() => {
     try {
       if (typeof sessionStorage !== "undefined") {
@@ -188,7 +187,7 @@ export default function App() {
           if (verifySessionIntegrity(parsed)) {
             return parsed;
           } else {
-            console.warn("⚠️ Sesi login tidak valid atau telah dimanipulasi. Mengembalikan ke mode Tamu.");
+            console.warn("⚠️ Sesi login tidak valid atau telah dimanipulasi.");
             sessionStorage.removeItem("classsense_session");
           }
         }
@@ -196,24 +195,33 @@ export default function App() {
     } catch (e) {
       console.error("Gagal membaca sesi pengguna:", e);
     }
-    // Default Role: Tamu / Civitas Akademika (Read-Only Monitoring)
-    return GUEST_USER;
+    // Wajib Login: currentUser bernilai null saat pertama kali dibuka
+    return null;
   });
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [permissionPromptMessage, setPermissionPromptMessage] = useState(null);
 
+  // Fungsi Logout Terpusat
+  const handleLogout = () => {
+    setCurrentUser(null);
+    try {
+      if (typeof sessionStorage !== "undefined") {
+        sessionStorage.removeItem("classsense_session");
+      }
+    } catch {}
+    setShowProfileModal(false);
+    setShowLoginModal(false);
+    setPermissionPromptMessage(null);
+    showToast("Anda telah keluar dari akun. Silakan login kembali untuk mengakses fasilitas.");
+  };
+
   // Simpan Sesi Pengguna ke SessionStorage (Hanya jika lolos verifikasi integritas)
   useEffect(() => {
     try {
       if (typeof sessionStorage !== "undefined") {
-        if (currentUser && currentUser.role !== "guest") {
-          const isValid = verifySessionIntegrity(currentUser);
-          if (isValid) {
-            sessionStorage.setItem("classsense_session", JSON.stringify(currentUser));
-          } else {
-            sessionStorage.removeItem("classsense_session");
-          }
+        if (currentUser && verifySessionIntegrity(currentUser)) {
+          sessionStorage.setItem("classsense_session", JSON.stringify(currentUser));
         } else {
           sessionStorage.removeItem("classsense_session");
         }
@@ -494,8 +502,8 @@ export default function App() {
     // 1. Verifikasi Integritas Sesi Kriptografis (Cegah modifikasi paksa role di DevTools)
     const isSessionIntegrityValid = verifySessionIntegrity(currentUser);
     if (!isSessionIntegrityValid) {
-      console.warn("🚨 Terdeteksi manipulasi sesi atau sesi telah kedaluwarsa. Mengembalikan ke mode Tamu.");
-      setCurrentUser(GUEST_USER);
+      console.warn("🚨 Terdeteksi manipulasi sesi atau sesi telah kedaluwarsa. Mengunci akses aplikasi.");
+      setCurrentUser(null);
       try {
         if (typeof sessionStorage !== "undefined") {
           sessionStorage.removeItem("classsense_session");
@@ -779,6 +787,48 @@ export default function App() {
     computedRooms.reduce((sum, r) => sum + r.aqi, 0) / (computedRooms.length || 1)
   );
 
+  // --------------------------------------------------------------------------
+  // MANDATORY AUTH GATE: WAJIB LOGIN SAAT APLIKASI DIBUKA (PENGUNCIAN PENUH)
+  // Pengguna yang belum login TIDAK BISA mengakses Beranda, Ruangan, Analitik,
+  // Audit Energi, maupun IoT Simulator Control.
+  // --------------------------------------------------------------------------
+  if (!currentUser || !verifySessionIntegrity(currentUser)) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-slate-800 flex justify-center selection:bg-teal-500 selection:text-white">
+        <div className="w-full max-w-[430px] bg-slate-50 min-h-screen flex flex-col relative shadow-2xl overflow-x-hidden font-sans">
+          {/* Toast jika ada pesan notifikasi */}
+          {toastMessage && (
+            <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-[390px] animate-in fade-in slide-in-from-top duration-200">
+              <div className="bg-slate-900/95 text-white px-3.5 py-2.5 rounded-2xl shadow-xl border border-slate-700/60 flex items-center justify-between text-xs backdrop-blur-md">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span className="font-medium text-slate-100 leading-snug">{toastMessage}</span>
+                </div>
+                <button
+                  onClick={() => setToastMessage(null)}
+                  className="text-slate-400 hover:text-white p-1"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          <LoginPage
+            isGateMode={true}
+            currentUser={currentUser}
+            permissionPromptMessage={permissionPromptMessage}
+            onLoginSuccess={(user) => {
+              setCurrentUser(user);
+              setPermissionPromptMessage(null);
+              showToast(`Selamat datang, ${user.name}! Sesi aktif sebagai ${user.roleBadge}.`);
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-900 text-slate-800 flex justify-center selection:bg-teal-500 selection:text-white">
       {/* Mobile Shell Frame (Pixel-Perfect Mobile Width max 430px) */}
@@ -808,7 +858,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             {/* Bell Notifikasi dengan status kritis */}
             <button
               onClick={() => {
@@ -842,17 +892,27 @@ export default function App() {
                 {currentUser?.avatarInitials || "UM"}
               </div>
               <div className="text-left hidden min-[360px]:block">
-                <span className="text-[10px] font-extrabold text-slate-800 block leading-tight truncate max-w-[70px]">
-                  {currentUser?.name ? currentUser.name.split(" ")[0] : "Tamu"}
+                <span className="text-[10px] font-extrabold text-slate-800 block leading-tight truncate max-w-[65px]">
+                  {currentUser?.name ? currentUser.name.split(" ")[0] : "Civitas"}
                 </span>
                 <span className="text-[8px] font-bold text-teal-800 uppercase tracking-tight block leading-none">
                   {currentUser?.role === "admin"
                     ? "Sarpras"
                     : currentUser?.role === "mahasiswa"
                     ? "Mahasiswa"
-                    : "Tamu"}
+                    : "Civitas"}
                 </span>
               </div>
+            </button>
+
+            {/* Tombol Logout Jelas di Header */}
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-red-50 hover:bg-red-100 active:scale-95 text-red-700 border border-red-200/80 text-[10px] font-extrabold transition shadow-xs"
+              title="Keluar dari Akun (Logout)"
+            >
+              <LogOut className="w-3.5 h-3.5 text-red-600" />
+              <span className="hidden min-[380px]:inline">Keluar</span>
             </button>
           </div>
         </header>
@@ -3241,19 +3301,10 @@ export default function App() {
                   <span>Buka Halaman Login</span>
                 </button>
                 <button
-                  onClick={() => {
-                    setCurrentUser(GUEST_USER);
-                    try {
-                      if (typeof sessionStorage !== "undefined") {
-                        sessionStorage.removeItem("classsense_session");
-                      }
-                    } catch {}
-                    setShowProfileModal(false);
-                    showToast("Anda telah keluar (Mode Tamu / Publik)");
-                  }}
-                  className="py-2.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1"
+                  onClick={handleLogout}
+                  className="py-2.5 px-3 bg-red-50 hover:bg-red-100 text-red-700 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1 border border-red-200"
                 >
-                  <LogOut className="w-3.5 h-3.5 text-slate-500" />
+                  <LogOut className="w-3.5 h-3.5 text-red-600" />
                   <span>Logout</span>
                 </button>
               </div>
