@@ -201,6 +201,100 @@ export const GUEST_USER = {
 };
 
 // ============================================================================
+// DYNAMIC CUSTOM REGISTERED USERS STORE (LOCALSTORAGE & MEMORY FALLBACK)
+// ============================================================================
+let MEMORY_CUSTOM_USERS = [];
+
+export function getCustomUsers() {
+  if (typeof localStorage !== "undefined") {
+    try {
+      const stored = localStorage.getItem("classsense_registered_users_v1");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
+      }
+    } catch {}
+  }
+  return MEMORY_CUSTOM_USERS;
+}
+
+export function saveCustomUser(user) {
+  const users = getCustomUsers();
+  const updated = [
+    ...users.filter(
+      (u) =>
+        u.email.toLowerCase() !== user.email.toLowerCase() &&
+        u.id !== user.id &&
+        (!user.identifier || u.identifier !== user.identifier)
+    ),
+    user,
+  ];
+  MEMORY_CUSTOM_USERS = updated;
+  if (typeof localStorage !== "undefined") {
+    try {
+      localStorage.setItem("classsense_registered_users_v1", JSON.stringify(updated));
+    } catch {}
+  }
+}
+
+export function clearCustomUsers() {
+  MEMORY_CUSTOM_USERS = [];
+  if (typeof localStorage !== "undefined") {
+    try {
+      localStorage.removeItem("classsense_registered_users_v1");
+    } catch {}
+  }
+}
+
+export function getInitials(name) {
+  if (!name) return "UM";
+  const parts = name.trim().split(/\s+/);
+  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+export function buildRoleProfile(role, name = "") {
+  const isAdmin = role === "admin";
+  const initials = getInitials(name);
+  if (isAdmin) {
+    return {
+      role: "admin",
+      roleLabel: "Staf Sarpras FT UM",
+      roleBadge: "Staf Sarpras (Admin)",
+      department: "Subbagian Sarana & Prasarana FT UM",
+      avatarInitials: initials || "SP",
+      avatarBg: "from-emerald-600 to-teal-800",
+      permissions: {
+        canControlActuators: true,      // Mengendalikan AC & Lampu jarak jauh
+        canAccessAuditManagement: true, // Eksekusi master shutdown energi
+        canAccessSimulator: true,       // Mengatur simulator telemetri IoT
+        canBookRooms: true,             // Reservasi ruang
+        canReportIssues: true,          // Laporan kendala
+        canManageRooms: true,           // Tambah & hapus ruangan kampus UM
+      },
+    };
+  }
+  return {
+    role: "mahasiswa",
+    roleLabel: "Mahasiswa / Dosen FT UM",
+    roleBadge: "Mahasiswa FT",
+    department: "Departemen Teknik Elektro & Informatika FT UM",
+    avatarInitials: initials || "FT",
+    avatarBg: "from-blue-600 to-indigo-700",
+    permissions: {
+      canControlActuators: false,     // Mahasiswa tidak berhak mematikan AC gedung
+      canAccessAuditManagement: false,// Hanya pantau / read-only
+      canAccessSimulator: false,      // Terkunci untuk staf/penguji
+      canBookRooms: true,             // Bisa reservasi ruang belajar
+      canReportIssues: true,          // Bisa laporkan kendala fasilitas
+      canManageRooms: false,          // Dibatasi untuk staf sarpras
+    },
+  };
+}
+
+// ============================================================================
 // CRYPTOGRAPHIC SESSION SIGNING & INTEGRITY VERIFICATION
 // ============================================================================
 
@@ -321,19 +415,20 @@ export async function authenticateUser(identifier, password) {
       const data = await response.json();
 
       if (response.ok && data.idToken) {
-        // Tentukan Role berdasarkan alamat email terautentikasi
-        const isAdmin =
-          cleanId === "sarpras@um.ac.id" ||
-          cleanId.includes("sarpras") ||
-          cleanId.includes("admin");
+        // Tentukan Role berdasarkan akun terdaftar atau alamat email
+        const allUsers = [...REGISTERED_USERS, ...getCustomUsers()];
+        const existingCustom = allUsers.find((u) => u.email.toLowerCase() === cleanId);
+        const isAdmin = existingCustom
+          ? existingCustom.role === "admin"
+          : cleanId === "sarpras@um.ac.id" || cleanId.includes("sarpras") || cleanId.includes("admin");
 
-        const baseProfile = isAdmin ? REGISTERED_USERS[0] : REGISTERED_USERS[1];
+        const baseProfile = existingCustom || (isAdmin ? REGISTERED_USERS[0] : REGISTERED_USERS[1]);
         const authenticatedUser = createSignedSession(
           {
             ...baseProfile,
             id: data.localId || baseProfile.id,
             email: data.email || cleanId,
-            name: isAdmin ? "Staf Sarpras FT UM" : "Mahasiswa FT UM",
+            name: existingCustom?.name || (isAdmin ? "Staf Sarpras FT UM" : "Mahasiswa FT UM"),
           },
           2,
           data.idToken
@@ -354,9 +449,15 @@ export async function authenticateUser(identifier, password) {
   // --------------------------------------------------------------------------
   // JALUR 2: OFFLINE CRYPTOGRAPHIC ONE-WAY HASH VERIFICATION (SHA-256 + Salt)
   // Kredensial diverifikasi secara matematis tanpa pernah mengekspos password plaintext.
+  // Mendukung login menggunakan Email maupun NIM / NIP.
   // --------------------------------------------------------------------------
-  const targetUser = REGISTERED_USERS.find(
-    (u) => u.email.toLowerCase() === cleanId
+  const allUsers = [...REGISTERED_USERS, ...getCustomUsers()];
+  const targetUser = allUsers.find(
+    (u) =>
+      u.email.toLowerCase() === cleanId ||
+      (u.identifier && u.identifier.toLowerCase() === cleanId) ||
+      (u.nim && u.nim.toLowerCase() === cleanId) ||
+      (u.nip && u.nip.toLowerCase() === cleanId)
   );
 
   if (targetUser && targetUser.passwordHash) {
@@ -376,7 +477,155 @@ export async function authenticateUser(identifier, password) {
   return {
     success: false,
     user: null,
-    error: "Kredensial tidak valid. Silakan periksa Email dan kata sandi Anda.",
+    error: "Kredensial tidak valid. Silakan periksa Email/NIM dan kata sandi Anda.",
+  };
+}
+
+/**
+ * Registrasi Akun Baru (Sign Up):
+ * 1. Validasi input nama, email, nim/nip, role, dan password (>= 6 karakter)
+ * 2. Cek duplikasi di database lokal & registered users
+ * 3. Integrasi Cloud Auth: Memanggil Firebase Auth REST API Sign-Up (accounts:signUp) jika API Key aktif
+ * 4. Menyimpan hash satu arah SHA-256 + salt (tanpa menyimpan plaintext password)
+ * 5. Menyimpan profil akun ke Firebase Realtime Database (/users/<uid>.json) & localStorage
+ * 6. Mengembalikan sesi login bertanda tangan (signed session) sehingga pengguna langsung bisa masuk
+ */
+export async function registerUser({ name, identifier, email, role = "mahasiswa", password }) {
+  const cleanName = (name || "").trim();
+  const cleanId = (identifier || "").trim();
+  const cleanEmail = (email || "").trim().toLowerCase();
+  const cleanPass = (password || "").trim();
+  const selectedRole = role === "admin" ? "admin" : "mahasiswa";
+
+  if (!cleanName) {
+    return { success: false, user: null, error: "Nama lengkap wajib diisi." };
+  }
+  if (!cleanEmail || !cleanEmail.includes("@")) {
+    return { success: false, user: null, error: "Format email kampus tidak valid." };
+  }
+  if (!cleanPass || cleanPass.length < 6) {
+    return { success: false, user: null, error: "Kata sandi minimal harus 6 karakter." };
+  }
+
+  // 1. Cek duplikasi akun di daftar akun terdaftar (bawaan + kustom)
+  const allUsers = [...REGISTERED_USERS, ...getCustomUsers()];
+  const isDuplicate = allUsers.some(
+    (u) =>
+      u.email.toLowerCase() === cleanEmail ||
+      (cleanId && (
+        (u.identifier && u.identifier.toLowerCase() === cleanId.toLowerCase()) ||
+        (u.nim && u.nim.toLowerCase() === cleanId.toLowerCase()) ||
+        (u.nip && u.nip.toLowerCase() === cleanId.toLowerCase())
+      ))
+  );
+
+  if (isDuplicate) {
+    return {
+      success: false,
+      user: null,
+      error: "Email atau NIM/NIP ini sudah terdaftar di sistem ClassSense.",
+    };
+  }
+
+  let firebaseIdToken = null;
+  let firebaseLocalId = null;
+
+  // 2. Integrasi Cloud Firebase Auth REST API (Sign-Up: accounts:signUp) jika API Key tersedia
+  const firebaseApiKey =
+    (typeof import.meta !== "undefined" && import.meta.env?.VITE_FIREBASE_API_KEY) ||
+    (typeof process !== "undefined" && process.env?.VITE_FIREBASE_API_KEY) ||
+    null;
+
+  if (firebaseApiKey && firebaseApiKey !== "TEMPEL_API_KEY_KAMU_DI_SINI" && cleanEmail.includes("@")) {
+    try {
+      const endpoint = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseApiKey}`;
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: cleanEmail,
+          password: cleanPass,
+          returnSecureToken: true,
+        }),
+      });
+
+      const data = await response.json();
+      if (response.ok && data.idToken) {
+        firebaseIdToken = data.idToken;
+        firebaseLocalId = data.localId;
+      } else if (data.error && data.error.message === "EMAIL_EXISTS") {
+        return {
+          success: false,
+          user: null,
+          error: "Email ini sudah terdaftar di Firebase Authentication.",
+        };
+      }
+    } catch {
+      // Graceful fallback ke registrasi offline kriptografis
+    }
+  }
+
+  // 3. Buat Hash Satu Arah SHA-256 + Salt (Bebas Plaintext Password)
+  const salt = DEMO_PASSWORD_SALT;
+  const passwordHash = sha256Sync(salt + cleanPass);
+  const userId = firebaseLocalId || `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const roleConfig = buildRoleProfile(selectedRole, cleanName);
+
+  const newAccount = {
+    id: userId,
+    email: cleanEmail,
+    identifier: cleanId || cleanEmail,
+    nim: selectedRole === "mahasiswa" ? (cleanId || undefined) : undefined,
+    nip: selectedRole === "admin" ? (cleanId || undefined) : undefined,
+    name: cleanName,
+    ...roleConfig,
+    salt,
+    passwordHash,
+    createdAt: new Date().toISOString(),
+  };
+
+  // 4. Sinkronisasi Profil ke Firebase Realtime Database (/users/{userId}.json) jika online
+  try {
+    const rtdbBase =
+      (typeof import.meta !== "undefined" && import.meta.env?.VITE_IOT_API_URL) ||
+      (typeof process !== "undefined" && process.env?.VITE_IOT_API_URL) ||
+      "https://classsense-6ef75-default-rtdb.asia-southeast1.firebasedatabase.app";
+
+    const cloudProfile = {
+      id: userId,
+      email: cleanEmail,
+      identifier: cleanId || cleanEmail,
+      nim: newAccount.nim,
+      nip: newAccount.nip,
+      name: cleanName,
+      role: roleConfig.role,
+      roleLabel: roleConfig.roleLabel,
+      roleBadge: roleConfig.roleBadge,
+      department: roleConfig.department,
+      createdAt: newAccount.createdAt,
+    };
+
+    const cleanBase = rtdbBase.replace(/\/+$/, "").replace(/\/rooms(\.json)?$/, "");
+    const userUrl = `${cleanBase}/users/${userId}.json${firebaseIdToken ? `?auth=${firebaseIdToken}` : ""}`;
+    fetch(userUrl, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cloudProfile),
+    }).catch(() => {});
+  } catch {}
+
+  // 5. Simpan ke Penyimpanan Lokal / Memori (classsense_registered_users_v1)
+  saveCustomUser(newAccount);
+
+  // 6. Buat Signed Session Instan agar pengguna langsung terotentikasi ke Beranda
+  const signedSession = createSignedSession(newAccount, 2, firebaseIdToken);
+
+  return {
+    success: true,
+    user: signedSession,
+    authProvider: firebaseIdToken ? "firebase-auth-rest" : "crypto-sha256-offline",
+    message: `Pendaftaran berhasil! Selamat datang di ClassSense, ${cleanName}.`,
+    error: null,
   };
 }
 

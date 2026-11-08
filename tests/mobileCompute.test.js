@@ -26,6 +26,7 @@ import {
 
 import {
   authenticateUser,
+  registerUser,
   checkPermission,
   createSignedSession,
   verifySessionIntegrity,
@@ -399,6 +400,65 @@ async function runTestSuite() {
     checkPermission(unauthenticatedUser, "canManageRooms") === false,
     "Auth & RBAC 7: Hak Pengelolaan Ruangan (canManageRooms)",
     "Sarpras: true, Mahasiswa: false, Unauthenticated: false"
+  );
+
+  // --------------------------------------------------------------------------
+  // 14a. REGISTRASI AKUN BARU (SIGN UP)
+  // --------------------------------------------------------------------------
+  console.log("\n📝 Menguji Registrasi Akun Baru (Sign Up)...");
+
+  // 1. Pendaftaran Akun Mahasiswa Baru
+  const regResult = await registerUser({
+    name: "Yudhistira Baraendra Rafi",
+    identifier: "240535615714",
+    email: "rafi.test2026@students.um.ac.id",
+    role: "mahasiswa",
+    password: "mhsPassword123",
+  });
+
+  assertTest(
+    regResult.success === true &&
+    regResult.user.role === "mahasiswa" &&
+    regResult.user.name === "Yudhistira Baraendra Rafi" &&
+    verifySessionIntegrity(regResult.user) === true &&
+    typeof regResult.user.password === "undefined" &&
+    typeof regResult.user.passwordHash === "undefined",
+    "Auth & Registrasi 1: Pendaftaran Akun Baru Berhasil & Menghasilkan Sesi Bertanda Tangan",
+    `User: ${regResult.user?.name} (${regResult.user?.role})`
+  );
+
+  // 2. Akun Baru Dapat Logout lalu Login Kembali via Email & NIM
+  const reAuthEmail = await authenticateUser("rafi.test2026@students.um.ac.id", "mhsPassword123");
+  const reAuthNim = await authenticateUser("240535615714", "mhsPassword123");
+  assertTest(
+    reAuthEmail.success === true &&
+    reAuthNim.success === true &&
+    reAuthEmail.user.role === "mahasiswa" &&
+    reAuthNim.user.name === "Yudhistira Baraendra Rafi",
+    "Auth & Registrasi 2: Akun Baru Dapat Login Kembali via Email atau NIM",
+    `Email Login: ${reAuthEmail.success}, NIM Login: ${reAuthNim.success}`
+  );
+
+  // 3. Penolakan Registrasi Duplikat & Password < 6 Karakter
+  const dupReg = await registerUser({
+    name: "Mahasiswa Kloning",
+    identifier: "240535615714",
+    email: "rafi.test2026@students.um.ac.id",
+    role: "mahasiswa",
+    password: "validPassword123",
+  });
+  const shortPassReg = await registerUser({
+    name: "User Password Pendek",
+    identifier: "9900112233",
+    email: "shortpass@um.ac.id",
+    role: "mahasiswa",
+    password: "123",
+  });
+  assertTest(
+    dupReg.success === false &&
+    shortPassReg.success === false,
+    "Auth & Registrasi 3: Penolakan Email/NIM Duplikat & Password < 6 Karakter",
+    `Dup Error: ${dupReg.error} | Short Error: ${shortPassReg.error}`
   );
 
   // --------------------------------------------------------------------------
